@@ -11,7 +11,7 @@ This repository was created in Session 1 by extracting the archiver from the
 All code, tests, and documentation have been set up from scratch.
 
 **Branch:** `main`
-**Tests:** 108 (all passing — airac 29, archiver 45, config 14, cli 17, plus helpers)
+**Tests:** 110 (all passing — airac 29, archiver 45, config 14, cli 17, rules_db 2, plus helpers)
 **Status:** Feature-complete; live test pending
 
 ## What was done in Session 1

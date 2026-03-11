@@ -38,12 +38,13 @@ this project created the new standalone repo.
 
 - `src/__main__.py` — Entry point enabling `python -m src archive`.
 
-**Tests (108 total, all green):**
+**Tests (110 total, all green):**
 
 - `tests/test_airac.py` — 29 tests (copied from fetcher)
 - `tests/test_archiver.py` — 45 tests (adapted; import path updated)
 - `tests/test_config.py` — 14 tests (new; covers all error cases)
 - `tests/test_cli.py` — 17 tests (new; covers archive command, resolve cycle, help, errors)
+- `tests/test_rules_db.py` — 2 tests (validates RULE: tag convention; skips if rules DB not found)
 
 **Documentation:**
 - `README.md` — Full user and developer documentation
@@ -55,3 +56,9 @@ this project created the new standalone repo.
 - Removed `archive_repo` from `src/config.py` and `config.yaml`
 - Updated all affected tests and documentation
 - Committed both repositories with clean history
+
+**Rules database and data dictionary (added in follow-up):**
+- Added `tests/test_rules_db.py` — validates the `[RULE:...]` tagging convention; skips if `vFPC-Rules-Database` is not found as a sibling repo
+- The archiver uses 0 `[RULE:...]` tags (it packages files, not aviation policy); test passes trivially and acts as a future guard
+- Added `airac-archiver Files` column to `vFPC-Rules-Database/Documentation/rules_reference.md` (all `—`)
+- Added **Rules database** and **Data dictionary** sections to `next_session_prompt.md` so future AI sessions have full ecosystem context
