@@ -1,0 +1,15 @@
+# AIRAC Archiver configuration
+# ---
+# This file is committed to version control with safe default values.
+# Create config.local.yaml (gitignored) to set your machine-specific paths
+# without touching this file.
+
+# Directory on your machine where per-cycle working directories live.
+# Each cycle has a sub-directory named "vFPC YYNN" (e.g. "vFPC 2603").
+# Set in config.local.yaml.
+workspace_base: ""
+
+# Path to your local clone of VFPC/airac-data.
+# The archiver writes the zip and manifest here, then runs git add.
+# Set in config.local.yaml.
+archive_repo: ""
