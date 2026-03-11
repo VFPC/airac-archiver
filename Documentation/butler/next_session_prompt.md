@@ -31,6 +31,36 @@ All code, tests, and documentation have been set up from scratch.
 2. Push to GitHub and create the remote repository
 3. Update `airac-data-fetcher` README to reference `airac-archiver` for the archive step
 
+## Rules database
+
+The vFPC ecosystem uses `[RULE:...]` tags to link code to aviation rule sources. The archiver currently uses **no** `[RULE:...]` tags — it packages files without interpreting aviation policy, so there are no rules to cite.
+
+- Convention: `C:\Users\jkino\Documents\GitHub\vFPC-Rules-Database\Documentation\convention.md`
+- Index: `C:\Users\jkino\Documents\GitHub\vFPC-Rules-Database\Documentation\rules_reference.md`
+- The rules_reference.md table has an **airac-archiver Files** column (all `—` for now)
+- `tests/test_rules_db.py` validates the convention; skips gracefully if the rules DB is not found
+
+If you need to add a rule tag in the future: propose the tag name first, wait for user approval, then add it to both source and `rules_reference.md`.
+
+## Data dictionary
+
+The archiver packages the output of the SRD Parser. The relevant data shapes are:
+
+| File | Source | Description |
+|---|---|---|
+| `in.json` | Manually created / copied forward | Input configuration for the SRD Parser |
+| `out.json` | SRD Parser output | The fully processed constraint tree (see `data_shapes.md` in New-SRDParser) |
+| `Routes.csv` | SRD Excel | Route constraints; feeds the SRD Parser (Stage 1 DTO input) |
+| `Notes.csv` | SRD Excel | Manual reference notes |
+| `EG-ENR-3.2-en-GB.html` | NATS AIP | ENR 3.2 airway table; read by AIP Parser |
+| `EG-ENR-3.3-en-GB.html` | NATS AIP | ENR 3.3 airway table; read by AIP Parser |
+| `UK_{YYYY}_{NN}.sct` | VATSIM-UK | UK sector file; read by vFPC plugin |
+
+The data dictionary for the internal data flow (CSV → SrdConstraint → ParsedConstraint → OutConstraint → JSON) is in:
+`C:\Users\jkino\Documents\GitHub\New-SRDParser\Documentation\diagrams\data_shapes.md`
+
+The archiver treats all files as opaque blobs — it does not validate their content.
+
 ## Key files
 
 | File | Purpose |
