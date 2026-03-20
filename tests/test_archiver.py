@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import zipfile
+import hashlib
 from datetime import date
 from pathlib import Path
 from unittest.mock import patch
@@ -14,9 +14,11 @@ from src.archiver import (
     ArchiverError,
     _archive_dir_name,
     _collect_files,
+    _copy_files,
     _create_manifest,
-    _create_zip,
     _git_stage,
+    _is_excluded,
+    _sha256,
     _sct_basename,
     archive_cycle,
 )
@@ -25,27 +27,50 @@ from src.archiver import (
 # Fixtures
 # ---------------------------------------------------------------------------
 
-CYCLE_2602 = cycle_for_date(date(2026, 2, 19))   # effective 2026-02-19
-CYCLE_2601 = cycle_for_date(date(2026, 1, 22))   # effective 2026-01-22
+CYCLE_2602 = cycle_for_date(date(2026, 2, 19))
+CYCLE_2601 = cycle_for_date(date(2026, 1, 22))
 
-_ALL_REQUIRED = [
+_EXPECTED_FILES = [
     "Routes.csv",
     "Notes.csv",
     "EG-ENR-3.2-en-GB.html",
     "EG-ENR-3.3-en-GB.html",
     "in.json",
     "out.json",
+    "aip_segments.json",
     "UK_2026_02.sct",
+]
+
+_EXTRA_FILES = [
+    "What's changed.csv",
+    "audit_decisions.md",
+    "discord_announcement.md",
+    "logs/log_20260219_0900.txt",
+]
+
+_EXCLUDED_FILES = [
+    "UK and Ireland SRD_March_2026.xlsx",
+    "output_20260219_090000.json",
+    "vFPC 2602.iml",
+    "workspace.xml",
+    ".gitignore",
 ]
 
 
 def _make_cycle_dir(tmp_path: Path, filenames: list[str]) -> Path:
-    """Create a cycle directory in *tmp_path* with the given files present."""
+    """Create a cycle directory with the given files (supports subdirectories)."""
     cycle_dir = tmp_path / "vFPC 2602"
     cycle_dir.mkdir()
     for name in filenames:
-        (cycle_dir / name).write_text(f"content of {name}", encoding="utf-8")
+        p = cycle_dir / name
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(f"content of {name}", encoding="utf-8")
     return cycle_dir
+
+
+def _make_full_cycle_dir(tmp_path: Path) -> Path:
+    """Create a realistic cycle directory with expected, extra, and excluded files."""
+    return _make_cycle_dir(tmp_path, _EXPECTED_FILES + _EXTRA_FILES + _EXCLUDED_FILES)
 
 
 # ---------------------------------------------------------------------------
@@ -75,8 +100,67 @@ class TestSctBasename:
         assert _sct_basename(CYCLE_2601) == "UK_2026_01.sct"
 
     def test_zero_padded(self):
-        cycle_01 = cycle_for_date(date(2026, 1, 22))
-        assert _sct_basename(cycle_01) == "UK_2026_01.sct"
+        assert _sct_basename(cycle_for_date(date(2026, 1, 22))) == "UK_2026_01.sct"
+
+
+# ---------------------------------------------------------------------------
+# _is_excluded
+# ---------------------------------------------------------------------------
+
+class TestIsExcluded:
+    def test_xlsx_excluded(self, tmp_path):
+        cycle_dir = tmp_path / "vFPC 2602"
+        cycle_dir.mkdir()
+        p = cycle_dir / "SRD_March.xlsx"
+        assert _is_excluded(p, cycle_dir)
+
+    def test_timestamped_json_excluded(self, tmp_path):
+        cycle_dir = tmp_path / "vFPC 2602"
+        cycle_dir.mkdir()
+        p = cycle_dir / "output_20260219_090000.json"
+        assert _is_excluded(p, cycle_dir)
+
+    def test_iml_excluded(self, tmp_path):
+        cycle_dir = tmp_path / "vFPC 2602"
+        cycle_dir.mkdir()
+        p = cycle_dir / "vFPC 2602.iml"
+        assert _is_excluded(p, cycle_dir)
+
+    def test_xml_excluded(self, tmp_path):
+        cycle_dir = tmp_path / "vFPC 2602"
+        cycle_dir.mkdir()
+        p = cycle_dir / "workspace.xml"
+        assert _is_excluded(p, cycle_dir)
+
+    def test_idea_dir_excluded(self, tmp_path):
+        cycle_dir = tmp_path / "vFPC 2602"
+        cycle_dir.mkdir()
+        p = cycle_dir / ".idea" / "misc.xml"
+        assert _is_excluded(p, cycle_dir)
+
+    def test_routes_csv_not_excluded(self, tmp_path):
+        cycle_dir = tmp_path / "vFPC 2602"
+        cycle_dir.mkdir()
+        p = cycle_dir / "Routes.csv"
+        assert not _is_excluded(p, cycle_dir)
+
+    def test_out_json_not_excluded(self, tmp_path):
+        cycle_dir = tmp_path / "vFPC 2602"
+        cycle_dir.mkdir()
+        p = cycle_dir / "out.json"
+        assert not _is_excluded(p, cycle_dir)
+
+    def test_log_file_not_excluded(self, tmp_path):
+        cycle_dir = tmp_path / "vFPC 2602"
+        cycle_dir.mkdir()
+        p = cycle_dir / "logs" / "log_20260219_0900.txt"
+        assert not _is_excluded(p, cycle_dir)
+
+    def test_audit_md_not_excluded(self, tmp_path):
+        cycle_dir = tmp_path / "vFPC 2602"
+        cycle_dir.mkdir()
+        p = cycle_dir / "audit_decisions.md"
+        assert not _is_excluded(p, cycle_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -84,103 +168,88 @@ class TestSctBasename:
 # ---------------------------------------------------------------------------
 
 class TestCollectFiles:
-    def test_returns_seven_paths_when_all_present(self, tmp_path):
-        cycle_dir = _make_cycle_dir(tmp_path, _ALL_REQUIRED)
-        result = _collect_files(cycle_dir, CYCLE_2602)
-        assert len(result) == 7
+    def test_collects_expected_and_extra_files(self, tmp_path):
+        cycle_dir = _make_full_cycle_dir(tmp_path)
+        files, _ = _collect_files(cycle_dir, CYCLE_2602)
+        names = {p.name for p in files}
+        for name in _EXPECTED_FILES + ["What's changed.csv", "audit_decisions.md"]:
+            assert name in names
 
-    def test_all_paths_exist(self, tmp_path):
-        cycle_dir = _make_cycle_dir(tmp_path, _ALL_REQUIRED)
-        result = _collect_files(cycle_dir, CYCLE_2602)
-        for p in result:
-            assert p.exists()
+    def test_excludes_xlsx(self, tmp_path):
+        cycle_dir = _make_full_cycle_dir(tmp_path)
+        files, _ = _collect_files(cycle_dir, CYCLE_2602)
+        names = {p.name for p in files}
+        assert not any(n.endswith(".xlsx") for n in names)
 
-    def test_all_expected_names_present(self, tmp_path):
-        cycle_dir = _make_cycle_dir(tmp_path, _ALL_REQUIRED)
-        result = _collect_files(cycle_dir, CYCLE_2602)
-        names = {p.name for p in result}
-        assert names == set(_ALL_REQUIRED)
+    def test_excludes_timestamped_json(self, tmp_path):
+        cycle_dir = _make_full_cycle_dir(tmp_path)
+        files, _ = _collect_files(cycle_dir, CYCLE_2602)
+        names = {p.name for p in files}
+        assert not any(n.startswith("output_") for n in names)
 
-    def test_raises_on_single_missing_file(self, tmp_path):
-        present = [f for f in _ALL_REQUIRED if f != "out.json"]
+    def test_excludes_idea_dir(self, tmp_path):
+        cycle_dir = _make_cycle_dir(tmp_path, _EXPECTED_FILES)
+        (cycle_dir / ".idea").mkdir()
+        (cycle_dir / ".idea" / "misc.xml").write_text("x")
+        files, _ = _collect_files(cycle_dir, CYCLE_2602)
+        assert not any(".idea" in str(p) for p in files)
+
+    def test_no_warnings_when_all_expected_present(self, tmp_path):
+        cycle_dir = _make_cycle_dir(tmp_path, _EXPECTED_FILES)
+        _, warnings = _collect_files(cycle_dir, CYCLE_2602)
+        assert warnings == []
+
+    def test_warns_on_missing_enr32(self, tmp_path):
+        present = [f for f in _EXPECTED_FILES if f != "EG-ENR-3.2-en-GB.html"]
         cycle_dir = _make_cycle_dir(tmp_path, present)
-        with pytest.raises(ArchiverError, match="out.json"):
-            _collect_files(cycle_dir, CYCLE_2602)
+        _, warnings = _collect_files(cycle_dir, CYCLE_2602)
+        assert "EG-ENR-3.2-en-GB.html" in warnings
 
-    def test_raises_on_multiple_missing_files(self, tmp_path):
-        present = [f for f in _ALL_REQUIRED if f not in ("out.json", "in.json")]
+    def test_warns_on_multiple_missing(self, tmp_path):
+        present = [f for f in _EXPECTED_FILES if f not in ("out.json", "in.json")]
         cycle_dir = _make_cycle_dir(tmp_path, present)
-        with pytest.raises(ArchiverError) as exc_info:
-            _collect_files(cycle_dir, CYCLE_2602)
-        msg = str(exc_info.value)
-        assert "out.json" in msg
-        assert "in.json" in msg
+        _, warnings = _collect_files(cycle_dir, CYCLE_2602)
+        assert "out.json" in warnings
+        assert "in.json" in warnings
 
-    def test_error_mentions_cycle_ident(self, tmp_path):
+    def test_no_error_on_empty_dir(self, tmp_path):
         cycle_dir = _make_cycle_dir(tmp_path, [])
-        with pytest.raises(ArchiverError, match="2602"):
-            _collect_files(cycle_dir, CYCLE_2602)
+        files, warnings = _collect_files(cycle_dir, CYCLE_2602)
+        assert files == []
+        # All expected files should be warned about (_EXPECTED_FILES already includes SCT)
+        assert len(warnings) == len(_EXPECTED_FILES)
 
-    def test_raises_when_sct_missing(self, tmp_path):
-        present = [f for f in _ALL_REQUIRED if not f.endswith(".sct")]
-        cycle_dir = _make_cycle_dir(tmp_path, present)
-        with pytest.raises(ArchiverError, match="UK_2026_02.sct"):
-            _collect_files(cycle_dir, CYCLE_2602)
-
-    def test_wrong_cycle_sct_not_accepted(self, tmp_path):
-        wrong_sct = _ALL_REQUIRED.copy()
-        wrong_sct.remove("UK_2026_02.sct")
-        wrong_sct.append("UK_2026_01.sct")
-        cycle_dir = _make_cycle_dir(tmp_path, wrong_sct)
-        with pytest.raises(ArchiverError, match="UK_2026_02.sct"):
-            _collect_files(cycle_dir, CYCLE_2602)
+    def test_returns_only_files_not_dirs(self, tmp_path):
+        cycle_dir = _make_cycle_dir(tmp_path, _EXPECTED_FILES)
+        files, _ = _collect_files(cycle_dir, CYCLE_2602)
+        for p in files:
+            assert p.is_file()
 
 
 # ---------------------------------------------------------------------------
-# _create_zip
+# _sha256
 # ---------------------------------------------------------------------------
 
-class TestCreateZip:
-    def test_creates_zip_file(self, tmp_path):
-        src = _make_cycle_dir(tmp_path, _ALL_REQUIRED)
-        files = [src / name for name in _ALL_REQUIRED]
-        zip_path = tmp_path / "out.zip"
-        _create_zip(files, zip_path)
-        assert zip_path.exists()
+class TestSha256:
+    def test_known_content(self, tmp_path):
+        p = tmp_path / "test.txt"
+        p.write_bytes(b"hello")
+        expected = hashlib.sha256(b"hello").hexdigest()
+        assert _sha256(p) == expected
 
-    def test_zip_contains_all_files(self, tmp_path):
-        src = _make_cycle_dir(tmp_path, _ALL_REQUIRED)
-        files = [src / name for name in _ALL_REQUIRED]
-        zip_path = tmp_path / "out.zip"
-        _create_zip(files, zip_path)
-        with zipfile.ZipFile(zip_path) as zf:
-            names = set(zf.namelist())
-        assert names == set(_ALL_REQUIRED)
+    def test_different_files_different_hashes(self, tmp_path):
+        a = tmp_path / "a.txt"
+        b = tmp_path / "b.txt"
+        a.write_bytes(b"aaa")
+        b.write_bytes(b"bbb")
+        assert _sha256(a) != _sha256(b)
 
-    def test_zip_is_flat_no_subdirectories(self, tmp_path):
-        src = _make_cycle_dir(tmp_path, _ALL_REQUIRED)
-        files = [src / name for name in _ALL_REQUIRED]
-        zip_path = tmp_path / "out.zip"
-        _create_zip(files, zip_path)
-        with zipfile.ZipFile(zip_path) as zf:
-            for name in zf.namelist():
-                assert "/" not in name
-
-    def test_zip_file_contents_preserved(self, tmp_path):
-        src = _make_cycle_dir(tmp_path, ["Routes.csv"])
-        (src / "Routes.csv").write_bytes(b"col1,col2\n1,2\n")
-        zip_path = tmp_path / "out.zip"
-        _create_zip([src / "Routes.csv"], zip_path)
-        with zipfile.ZipFile(zip_path) as zf:
-            assert zf.read("Routes.csv") == b"col1,col2\n1,2\n"
-
-    def test_zip_uses_deflate_compression(self, tmp_path):
-        src = _make_cycle_dir(tmp_path, ["in.json"])
-        zip_path = tmp_path / "out.zip"
-        _create_zip([src / "in.json"], zip_path)
-        with zipfile.ZipFile(zip_path) as zf:
-            info = zf.getinfo("in.json")
-            assert info.compress_type == zipfile.ZIP_DEFLATED
+    def test_returns_64_char_hex(self, tmp_path):
+        p = tmp_path / "f.txt"
+        p.write_bytes(b"x")
+        result = _sha256(p)
+        assert len(result) == 64
+        assert all(c in "0123456789abcdef" for c in result)
 
 
 # ---------------------------------------------------------------------------
@@ -188,13 +257,15 @@ class TestCreateZip:
 # ---------------------------------------------------------------------------
 
 class TestCreateManifest:
-    def _write_manifest(self, tmp_path: Path) -> str:
-        files = [tmp_path / name for name in _ALL_REQUIRED]
-        for p in files:
+    def _write_manifest(self, tmp_path: Path, warnings: list[str] = None) -> str:
+        files = []
+        for name in _EXPECTED_FILES:
+            p = tmp_path / name
             p.write_text("x", encoding="utf-8")
+            files.append(p)
         manifest_path = tmp_path / "manifest.md"
         with patch("getpass.getuser", return_value="testuser"):
-            _create_manifest(CYCLE_2602, files, manifest_path)
+            _create_manifest(CYCLE_2602, files, warnings or [], manifest_path)
         return manifest_path.read_text(encoding="utf-8")
 
     def test_creates_file(self, tmp_path):
@@ -202,33 +273,76 @@ class TestCreateManifest:
         assert (tmp_path / "manifest.md").exists()
 
     def test_contains_cycle_ident(self, tmp_path):
-        text = self._write_manifest(tmp_path)
-        assert "2602" in text
+        assert "2602" in self._write_manifest(tmp_path)
 
     def test_contains_effective_date(self, tmp_path):
-        text = self._write_manifest(tmp_path)
-        assert "2026-02-19" in text
+        assert "2026-02-19" in self._write_manifest(tmp_path)
 
     def test_contains_expiry_date(self, tmp_path):
-        text = self._write_manifest(tmp_path)
-        assert CYCLE_2602.expiry_date.isoformat() in text
+        assert CYCLE_2602.expiry_date.isoformat() in self._write_manifest(tmp_path)
 
     def test_contains_username(self, tmp_path):
-        text = self._write_manifest(tmp_path)
-        assert "testuser" in text
+        assert "testuser" in self._write_manifest(tmp_path)
 
     def test_lists_all_files(self, tmp_path):
         text = self._write_manifest(tmp_path)
-        for name in _ALL_REQUIRED:
+        for name in _EXPECTED_FILES:
             assert name in text
 
-    def test_archived_utc_label_present(self, tmp_path):
+    def test_contains_sha256_checksums(self, tmp_path):
         text = self._write_manifest(tmp_path)
-        assert "UTC" in text
+        # SHA256 hashes are 64 hex chars
+        import re
+        assert re.search(r"[0-9a-f]{64}", text)
+
+    def test_contains_utc_label(self, tmp_path):
+        assert "UTC" in self._write_manifest(tmp_path)
 
     def test_is_valid_markdown_heading(self, tmp_path):
-        text = self._write_manifest(tmp_path)
-        assert text.startswith("# Archive manifest")
+        assert self._write_manifest(tmp_path).startswith("# Archive manifest")
+
+    def test_no_warnings_section_when_none(self, tmp_path):
+        text = self._write_manifest(tmp_path, warnings=[])
+        assert "Warnings" not in text
+
+    def test_warnings_section_present_when_missing(self, tmp_path):
+        text = self._write_manifest(tmp_path, warnings=["EG-ENR-3.2-en-GB.html"])
+        assert "Warnings" in text
+        assert "EG-ENR-3.2-en-GB.html" in text
+        assert "MISSING" in text
+
+
+# ---------------------------------------------------------------------------
+# _copy_files
+# ---------------------------------------------------------------------------
+
+class TestCopyFiles:
+    def test_copies_all_files(self, tmp_path):
+        src_dir = tmp_path / "src"
+        src_dir.mkdir()
+        dest_dir = tmp_path / "dest"
+        files = []
+        for name in ["a.txt", "b.txt"]:
+            p = src_dir / name
+            p.write_text(name)
+            files.append(p)
+        copied = _copy_files(files, dest_dir)
+        assert all(p.exists() for p in copied)
+        assert {p.name for p in copied} == {"a.txt", "b.txt"}
+
+    def test_creates_dest_dir_if_missing(self, tmp_path):
+        src = tmp_path / "f.txt"
+        src.write_text("x")
+        dest_dir = tmp_path / "new" / "subdir"
+        _copy_files([src], dest_dir)
+        assert dest_dir.is_dir()
+
+    def test_preserves_file_contents(self, tmp_path):
+        src = tmp_path / "data.json"
+        src.write_bytes(b'{"key": "value"}')
+        dest_dir = tmp_path / "dest"
+        _copy_files([src], dest_dir)
+        assert (dest_dir / "data.json").read_bytes() == b'{"key": "value"}'
 
 
 # ---------------------------------------------------------------------------
@@ -237,7 +351,7 @@ class TestCreateManifest:
 
 class TestGitStage:
     def test_calls_git_add_with_paths(self, tmp_path):
-        p1 = tmp_path / "a.zip"
+        p1 = tmp_path / "a.txt"
         p2 = tmp_path / "manifest.md"
         with patch("subprocess.run") as mock_run:
             mock_run.return_value.returncode = 0
@@ -274,45 +388,84 @@ class TestGitStage:
 # ---------------------------------------------------------------------------
 
 class TestArchiveCycle:
-    def _run(self, tmp_path: Path) -> tuple[Path, Path]:
-        cycle_dir = _make_cycle_dir(tmp_path, _ALL_REQUIRED)
+    def _run(self, tmp_path: Path, filenames: list[str] = None) -> tuple[list[Path], Path]:
+        cycle_dir = _make_cycle_dir(tmp_path, filenames or _EXPECTED_FILES)
         archive_repo = tmp_path / "airac-data"
         archive_repo.mkdir()
         with patch("subprocess.run") as mock_run:
             mock_run.return_value.returncode = 0
             return archive_cycle(CYCLE_2602, cycle_dir, archive_repo)
 
-    def test_returns_zip_and_manifest_paths(self, tmp_path):
-        zip_path, manifest_path = self._run(tmp_path)
-        assert isinstance(zip_path, Path)
+    def test_returns_copied_paths_and_manifest(self, tmp_path):
+        copied, manifest_path = self._run(tmp_path)
+        assert isinstance(copied, list)
         assert isinstance(manifest_path, Path)
 
-    def test_zip_path_is_inside_cycle_subdir(self, tmp_path):
-        zip_path, _ = self._run(tmp_path)
-        assert zip_path.parent.name == "vFPC 2602"
-
-    def test_manifest_path_is_sibling_of_zip(self, tmp_path):
-        zip_path, manifest_path = self._run(tmp_path)
-        assert zip_path.parent == manifest_path.parent
-
-    def test_zip_filename_matches_subdir(self, tmp_path):
-        zip_path, _ = self._run(tmp_path)
-        assert zip_path.name == "vFPC 2602.zip"
+    def test_files_staged_in_cycle_subdir(self, tmp_path):
+        copied, manifest_path = self._run(tmp_path)
+        for p in copied:
+            assert p.parent.name == "vFPC 2602"
+        assert manifest_path.parent.name == "vFPC 2602"
 
     def test_manifest_filename(self, tmp_path):
         _, manifest_path = self._run(tmp_path)
         assert manifest_path.name == "manifest.md"
 
-    def test_zip_file_exists_on_disk(self, tmp_path):
-        zip_path, _ = self._run(tmp_path)
-        assert zip_path.exists()
+    def test_copied_files_exist_on_disk(self, tmp_path):
+        copied, _ = self._run(tmp_path)
+        for p in copied:
+            assert p.exists()
 
-    def test_manifest_file_exists_on_disk(self, tmp_path):
+    def test_manifest_exists_on_disk(self, tmp_path):
         _, manifest_path = self._run(tmp_path)
         assert manifest_path.exists()
 
+    def test_all_expected_files_copied(self, tmp_path):
+        copied, _ = self._run(tmp_path)
+        names = {p.name for p in copied}
+        for name in _EXPECTED_FILES:
+            assert name in names
+
+    def test_excluded_files_not_copied(self, tmp_path):
+        all_files = _EXPECTED_FILES + _EXCLUDED_FILES
+        cycle_dir = _make_cycle_dir(tmp_path, all_files)
+        archive_repo = tmp_path / "airac-data"
+        archive_repo.mkdir()
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value.returncode = 0
+            copied, _ = archive_cycle(CYCLE_2602, cycle_dir, archive_repo)
+        names = {p.name for p in copied}
+        for name in _EXCLUDED_FILES:
+            assert name not in names
+
+    def test_extra_files_are_included(self, tmp_path):
+        all_files = _EXPECTED_FILES + ["audit_decisions.md", "What's changed.csv"]
+        cycle_dir = _make_cycle_dir(tmp_path, all_files)
+        archive_repo = tmp_path / "airac-data"
+        archive_repo.mkdir()
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value.returncode = 0
+            copied, _ = archive_cycle(CYCLE_2602, cycle_dir, archive_repo)
+        names = {p.name for p in copied}
+        assert "audit_decisions.md" in names
+        assert "What's changed.csv" in names
+
+    def test_succeeds_with_missing_expected_file(self, tmp_path):
+        # Missing ENR 3.2 — should NOT raise, just warn
+        partial = [f for f in _EXPECTED_FILES if f != "EG-ENR-3.2-en-GB.html"]
+        copied, manifest_path = self._run(tmp_path, filenames=partial)
+        assert manifest_path.exists()
+        assert "EG-ENR-3.2-en-GB.html" not in {p.name for p in copied}
+
+    def test_manifest_records_missing_file_warning(self, tmp_path):
+        partial = [f for f in _EXPECTED_FILES if f != "EG-ENR-3.2-en-GB.html"]
+        _, manifest_path = self._run(tmp_path, filenames=partial)
+        text = manifest_path.read_text()
+        assert "EG-ENR-3.2-en-GB.html" in text
+        assert "MISSING" in text
+
     def test_git_add_called_once(self, tmp_path):
-        cycle_dir = _make_cycle_dir(tmp_path, _ALL_REQUIRED)
+        cycle_dir = _make_cycle_dir(tmp_path, _EXPECTED_FILES)
         archive_repo = tmp_path / "airac-data"
         archive_repo.mkdir()
         with patch("subprocess.run") as mock_run:
@@ -320,29 +473,18 @@ class TestArchiveCycle:
             archive_cycle(CYCLE_2602, cycle_dir, archive_repo)
         assert mock_run.call_count == 1
 
-    def test_git_add_stages_both_files(self, tmp_path):
-        cycle_dir = _make_cycle_dir(tmp_path, _ALL_REQUIRED)
+    def test_git_add_stages_manifest(self, tmp_path):
+        cycle_dir = _make_cycle_dir(tmp_path, _EXPECTED_FILES)
         archive_repo = tmp_path / "airac-data"
         archive_repo.mkdir()
         with patch("subprocess.run") as mock_run:
             mock_run.return_value.returncode = 0
-            zip_path, manifest_path = archive_cycle(CYCLE_2602, cycle_dir, archive_repo)
+            _, manifest_path = archive_cycle(CYCLE_2602, cycle_dir, archive_repo)
         cmd = mock_run.call_args[0][0]
-        assert str(zip_path) in cmd
         assert str(manifest_path) in cmd
 
-    def test_raises_on_missing_file(self, tmp_path):
-        partial = [f for f in _ALL_REQUIRED if f != "out.json"]
-        cycle_dir = _make_cycle_dir(tmp_path, partial)
-        archive_repo = tmp_path / "airac-data"
-        archive_repo.mkdir()
-        with pytest.raises(ArchiverError, match="out.json"):
-            with patch("subprocess.run") as mock_run:
-                mock_run.return_value.returncode = 0
-                archive_cycle(CYCLE_2602, cycle_dir, archive_repo)
-
     def test_raises_on_git_failure(self, tmp_path):
-        cycle_dir = _make_cycle_dir(tmp_path, _ALL_REQUIRED)
+        cycle_dir = _make_cycle_dir(tmp_path, _EXPECTED_FILES)
         archive_repo = tmp_path / "airac-data"
         archive_repo.mkdir()
         with patch("subprocess.run") as mock_run:
@@ -351,17 +493,7 @@ class TestArchiveCycle:
             with pytest.raises(ArchiverError, match="git add failed"):
                 archive_cycle(CYCLE_2602, cycle_dir, archive_repo)
 
-    def test_zip_contains_all_seven_files(self, tmp_path):
-        zip_path, _ = self._run(tmp_path)
-        with zipfile.ZipFile(zip_path) as zf:
-            names = set(zf.namelist())
-        assert names == set(_ALL_REQUIRED)
-
-    def test_does_not_call_git_if_files_missing(self, tmp_path):
-        cycle_dir = _make_cycle_dir(tmp_path, [])
-        archive_repo = tmp_path / "airac-data"
-        archive_repo.mkdir()
-        with patch("subprocess.run") as mock_run:
-            with pytest.raises(ArchiverError):
-                archive_cycle(CYCLE_2602, cycle_dir, archive_repo)
-        mock_run.assert_not_called()
+    def test_no_zip_file_created(self, tmp_path):
+        copied, manifest_path = self._run(tmp_path)
+        subdir = manifest_path.parent
+        assert not any(p.suffix == ".zip" for p in subdir.iterdir())

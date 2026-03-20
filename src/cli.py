@@ -29,7 +29,7 @@ from pathlib import Path
 import click
 
 from src.airac import AiracCycle, current_cycle, cycle_for_date
-from src.archiver import ArchiverError, archive_cycle
+from src.archiver import ArchiverError, _collect_files, archive_cycle
 from src.config import ConfigError, load
 
 _IDENT_RE = re.compile(r"^\d{4}$")
@@ -108,17 +108,24 @@ def archive(cycle: str | None) -> None:
     click.echo(f"Working dir:  {cycle_dir}")
     click.echo(f"Archive repo: {cfg.archive_repo}\n")
 
-    click.echo("  Collecting files, creating zip, writing manifest, staging...", nl=False)
+    # Surface warnings before archiving so the operator can see them clearly
+    _, warnings = _collect_files(cycle_dir, target)
+    if warnings:
+        click.echo("  Warnings — expected files not found:", err=True)
+        for name in warnings:
+            click.echo(f"    MISSING: {name}", err=True)
+        click.echo("  Proceeding with incomplete archive.\n", err=True)
+
+    click.echo("  Collecting files, writing manifest, copying, staging...", nl=False)
     try:
-        zip_path, manifest_path = archive_cycle(target, cycle_dir, cfg.archive_repo)
+        copied, manifest_path = archive_cycle(target, cycle_dir, cfg.archive_repo)
     except ArchiverError as exc:
         click.echo("")
         _abort(str(exc))
 
     click.echo(" done")
-    click.echo(f"\nStaged for review:")
-    click.echo(f"  {zip_path}")
-    click.echo(f"  {manifest_path}")
+    click.echo(f"\n  {len(copied)} file(s) + manifest staged in:")
+    click.echo(f"  {manifest_path.parent}")
     click.echo("\nReview and commit when ready.")
 
 

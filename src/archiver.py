@@ -1,36 +1,46 @@
-"""Zip prepared cycle files and stage in the airac-data repo with a manifest.
+"""Collect cycle files and stage them as flat files in the airac-data repo.
 
 Workflow
 --------
-1. Verify all seven required files are present in the cycle working directory.
-2. Create a zip containing those files (flat layout, no sub-directories).
-3. Write a manifest.md alongside the zip.
-4. Run ``git add`` on both files so they are staged for the user's review
-   before committing.
+1. Collect all files from the cycle working directory, excluding known noise
+   (IDE artifacts, Excel source, timestamped duplicates).
+2. Warn about any expected files that are absent — but proceed regardless.
+3. Write a manifest.md recording cycle metadata, file list, and SHA256 checksums.
+4. Copy all collected files plus the manifest into the archive repo under
+   ``{archive_repo}/vFPC YYNN/``, then run ``git add`` to stage them.
 
 Archive layout in airac-data repo
 ----------------------------------
-``{archive_repo}/vFPC YYNN/vFPC YYNN.zip``
-``{archive_repo}/vFPC YYNN/manifest.md``
+``{archive_repo}/vFPC YYNN/<filename>``   — one flat file per collected file
+``{archive_repo}/vFPC YYNN/manifest.md``  — cycle metadata + checksums
 
-Required files
---------------
-Every archive must contain exactly these seven files:
+Expected files (warning if absent)
+-----------------------------------
+Every archive should contain these files.  Their absence is logged as a warning
+but does not prevent archiving:
 
 - Routes.csv          — SRD Parser route input
 - Notes.csv           — SRD Parser notes input
 - EG-ENR-3.2-en-GB.html — AIP Parser ENR 3.2 input
 - EG-ENR-3.3-en-GB.html — AIP Parser ENR 3.3 input
 - UK_{YYYY}_{NN}.sct  — VATSIM UK sector file
-- in.json             — SRD Parser config input (copied forward)
-- out.json            — SRD Parser output (written after a successful parser run)
+- in.json             — SRD Parser config input
+- out.json            — SRD Parser output
+- aip_segments.json   — AIP Parser output (MC resolution input)
+
+Excluded files (never archived)
+--------------------------------
+- ``*.xlsx`` — NATS source Excel; superseded by Routes.csv / Notes.csv
+- ``output_*.json`` — timestamped parser duplicates; out.json is canonical
+- ``*.iml``, ``.idea/``, ``__pycache__/`` — IDE and build artefacts
 """
 
 from __future__ import annotations
 
 import getpass
+import hashlib
+import shutil
 import subprocess
-import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -42,14 +52,28 @@ from src.airac import AiracCycle
 
 _DIR_PREFIX = "vFPC "
 
-_FIXED_REQUIRED = [
+# Files we warn about if absent — in the order they should appear in the manifest.
+_EXPECTED_FIXED = [
     "Routes.csv",
     "Notes.csv",
     "EG-ENR-3.2-en-GB.html",
     "EG-ENR-3.3-en-GB.html",
     "in.json",
     "out.json",
+    "aip_segments.json",
 ]
+
+# Glob patterns matched against each file's name — matching files are excluded.
+_EXCLUDE_PATTERNS = [
+    "*.xlsx",           # NATS source Excel
+    "output_*.json",    # timestamped parser duplicates
+    "*.iml",            # JetBrains module files
+    "*.xml",            # JetBrains workspace / inspection XML
+    "*.gitignore",      # IDE-generated gitignore
+]
+
+# Directory names — any entry whose path component matches is excluded entirely.
+_EXCLUDE_DIRS = {".idea", "__pycache__", ".git", "node_modules"}
 
 
 # ---------------------------------------------------------------------------
@@ -57,7 +81,7 @@ _FIXED_REQUIRED = [
 # ---------------------------------------------------------------------------
 
 class ArchiverError(Exception):
-    """Raised when archiving fails due to missing files or a git error."""
+    """Raised when archiving fails due to a git error or unrecoverable I/O problem."""
 
 
 # ---------------------------------------------------------------------------
@@ -65,55 +89,69 @@ class ArchiverError(Exception):
 # ---------------------------------------------------------------------------
 
 def _archive_dir_name(cycle: AiracCycle) -> str:
-    """Return the subdirectory name for *cycle* in the airac-data repo."""
     return f"{_DIR_PREFIX}{cycle.ident}"
 
 
 def _sct_basename(cycle: AiracCycle) -> str:
-    """Return the expected SCT filename for *cycle*."""
     return f"UK_{cycle.year}_{cycle.number:02d}.sct"
 
 
-def _collect_files(cycle_dir: Path, cycle: AiracCycle) -> list[Path]:
-    """Collect and validate all required files from *cycle_dir*.
+def _is_excluded(path: Path, cycle_dir: Path) -> bool:
+    """Return True if *path* should be excluded from the archive."""
+    # Exclude anything inside a blacklisted directory
+    try:
+        rel = path.relative_to(cycle_dir)
+    except ValueError:
+        return True
+    for part in rel.parts[:-1]:       # all directory components
+        if part in _EXCLUDE_DIRS:
+            return True
 
-    Returns a list of Paths for all seven required files in a stable order.
-    Raises ArchiverError listing every missing file if any are absent.
+    # Exclude by filename pattern
+    name = path.name
+    for pattern in _EXCLUDE_PATTERNS:
+        if path.match(pattern):
+            return True
+
+    return False
+
+
+def _collect_files(cycle_dir: Path, cycle: AiracCycle) -> tuple[list[Path], list[str]]:
+    """Collect all archivable files from *cycle_dir*.
+
+    Returns a ``(files, warnings)`` tuple where:
+    - ``files`` is the list of Paths to archive (sorted by name)
+    - ``warnings`` lists the names of expected files that are absent
     """
-    required_names = _FIXED_REQUIRED + [_sct_basename(cycle)]
-    missing: list[str] = []
-    paths: list[Path] = []
+    all_files = sorted(
+        p for p in cycle_dir.rglob("*")
+        if p.is_file() and not _is_excluded(p, cycle_dir)
+    )
 
-    for name in required_names:
-        p = cycle_dir / name
-        if not p.exists():
-            missing.append(name)
-        else:
-            paths.append(p)
+    # Check for expected files and build warnings
+    present_names = {p.name for p in all_files}
+    expected = _EXPECTED_FIXED + [_sct_basename(cycle)]
+    warnings = [name for name in expected if name not in present_names]
 
-    if missing:
-        raise ArchiverError(
-            f"Cannot archive cycle {cycle.ident} — the following required files "
-            f"are missing from {cycle_dir}:\n"
-            + "\n".join(f"  - {name}" for name in missing)
-        )
-
-    return paths
+    return all_files, warnings
 
 
-def _create_zip(files: list[Path], zip_path: Path) -> None:
-    """Create a zip archive at *zip_path* containing *files* in a flat layout."""
-    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for file_path in files:
-            zf.write(file_path, arcname=file_path.name)
+def _sha256(path: Path) -> str:
+    """Return the hex SHA256 digest of *path*."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def _create_manifest(
     cycle: AiracCycle,
     files: list[Path],
+    warnings: list[str],
     manifest_path: Path,
 ) -> None:
-    """Write a manifest.md recording the archive metadata."""
+    """Write a manifest.md recording cycle metadata, file list, and checksums."""
     now = datetime.now(tz=timezone.utc)
     user = getpass.getuser()
     dir_name = _archive_dir_name(cycle)
@@ -127,21 +165,44 @@ def _create_manifest(
         f"**Archived:** {now.strftime('%Y-%m-%d %H:%M:%S')} UTC  ",
         f"**Archived by:** {user}  ",
         "",
+    ]
+
+    if warnings:
+        lines += [
+            "## Warnings",
+            "",
+        ]
+        for name in warnings:
+            lines.append(f"- `{name}` — **MISSING** from cycle directory")
+        lines.append("")
+
+    lines += [
         "## Files",
         "",
+        "| File | SHA256 |",
+        "|------|--------|",
     ]
     for file_path in sorted(files, key=lambda p: p.name):
-        lines.append(f"- `{file_path.name}`")
+        checksum = _sha256(file_path)
+        lines.append(f"| `{file_path.name}` | `{checksum}` |")
     lines.append("")
 
     manifest_path.write_text("\n".join(lines), encoding="utf-8")
 
 
-def _git_stage(archive_repo: Path, *paths: Path) -> None:
-    """Run ``git add`` for *paths* inside *archive_repo*.
+def _copy_files(files: list[Path], dest_dir: Path) -> list[Path]:
+    """Copy *files* into *dest_dir*, returning the list of destination paths."""
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    copied = []
+    for src in files:
+        dst = dest_dir / src.name
+        shutil.copy2(src, dst)
+        copied.append(dst)
+    return copied
 
-    Raises ArchiverError if git returns a non-zero exit code.
-    """
+
+def _git_stage(archive_repo: Path, *paths: Path) -> None:
+    """Run ``git add`` for *paths* inside *archive_repo*."""
     result = subprocess.run(
         ["git", "add", "--"] + [str(p) for p in paths],
         cwd=archive_repo,
@@ -162,13 +223,12 @@ def archive_cycle(
     cycle: AiracCycle,
     cycle_dir: Path,
     archive_repo: Path,
-) -> tuple[Path, Path]:
-    """Zip the prepared cycle files and stage them in the airac-data repo.
+) -> tuple[list[Path], Path]:
+    """Collect cycle files and stage them as flat files in the airac-data repo.
 
-    Collects the seven required files from *cycle_dir*, creates
-    ``{archive_repo}/vFPC {ident}/vFPC {ident}.zip`` and a sibling
-    ``manifest.md``, then runs ``git add`` so both are staged for review
-    before committing.
+    Collects all non-excluded files from *cycle_dir*, warns about any expected
+    files that are absent, writes a manifest with SHA256 checksums, copies
+    everything into ``{archive_repo}/vFPC {ident}/``, and runs ``git add``.
 
     Args:
         cycle:        The target AIRAC cycle.
@@ -176,22 +236,26 @@ def archive_cycle(
         archive_repo: Local clone of the airac-data repository.
 
     Returns:
-        A ``(zip_path, manifest_path)`` tuple for the two files written.
+        A ``(copied_paths, manifest_path)`` tuple.
 
     Raises:
-        ArchiverError: if any required file is missing, or if ``git add`` fails.
+        ArchiverError: if ``git add`` fails.
     """
-    files = _collect_files(cycle_dir, cycle)
+    files, warnings = _collect_files(cycle_dir, cycle)
 
-    subdir_name = _archive_dir_name(cycle)
-    subdir = archive_repo / subdir_name
+    subdir = archive_repo / _archive_dir_name(cycle)
     subdir.mkdir(parents=True, exist_ok=True)
-
-    zip_path = subdir / f"{subdir_name}.zip"
     manifest_path = subdir / "manifest.md"
 
-    _create_zip(files, zip_path)
-    _create_manifest(cycle, files, manifest_path)
-    _git_stage(archive_repo, zip_path, manifest_path)
+    # Write manifest alongside the source files so its checksum is not
+    # included in the file table (it can't hash itself).
+    _create_manifest(cycle, files, warnings, manifest_path)
 
-    return zip_path, manifest_path
+    # Copy source files into the archive subdir
+    copied = _copy_files(files, subdir)
+
+    # Stage everything: copied files + manifest
+    all_staged = copied + [manifest_path]
+    _git_stage(archive_repo, *all_staged)
+
+    return copied, manifest_path
