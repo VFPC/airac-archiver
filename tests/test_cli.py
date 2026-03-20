@@ -66,17 +66,27 @@ class TestResolveCycle:
 # archive command
 # ---------------------------------------------------------------------------
 
+def _make_archive_result(cfg: "Config", ident: str) -> tuple[list[Path], Path]:
+    """Build a realistic archive_cycle return value for the given cycle ident."""
+    subdir = cfg.archive_repo / f"vFPC {ident}"
+    copied = [
+        subdir / "Routes.csv",
+        subdir / "out.json",
+    ]
+    manifest_p = subdir / "manifest.md"
+    return (copied, manifest_p)
+
+
 class TestArchiveCommand:
     def _invoke(self, tmp_path: Path, archive_result=None):
         cfg = _make_config(tmp_path)
         runner = CliRunner()
         if archive_result is None:
-            zip_p = cfg.archive_repo / "vFPC 2603" / "vFPC 2603.zip"
-            manifest_p = cfg.archive_repo / "vFPC 2603" / "manifest.md"
-            archive_result = (zip_p, manifest_p)
+            archive_result = _make_archive_result(cfg, "2603")
         with (
             patch("src.cli.load", return_value=cfg),
             patch("src.cli.archive_cycle", return_value=archive_result),
+            patch("src.cli._collect_files", return_value=([], [])),
         ):
             return runner.invoke(cli, ["archive", "--cycle", "2603"])
 
@@ -87,24 +97,39 @@ class TestArchiveCommand:
         assert "2603" in self._invoke(tmp_path).output
 
     def test_output_mentions_staged(self, tmp_path):
-        assert "Staged" in self._invoke(tmp_path).output
+        assert "staged" in self._invoke(tmp_path).output.lower()
 
     def test_output_mentions_commit(self, tmp_path):
         assert "commit" in self._invoke(tmp_path).output.lower()
 
-    def test_shows_zip_path(self, tmp_path):
+    def test_shows_archive_subdir(self, tmp_path):
+        result = self._invoke(tmp_path)
+        assert "vFPC 2603" in result.output
+
+    def test_shows_file_count(self, tmp_path):
+        result = self._invoke(tmp_path)
+        # "2 file(s)" from the mock archive_result
+        assert "2" in result.output
+
+    def test_warnings_shown_when_files_missing(self, tmp_path):
         cfg = _make_config(tmp_path)
-        zip_p = cfg.archive_repo / "vFPC 2603" / "vFPC 2603.zip"
-        manifest_p = cfg.archive_repo / "vFPC 2603" / "manifest.md"
-        result = self._invoke(tmp_path, archive_result=(zip_p, manifest_p))
-        assert "vFPC 2603.zip" in result.output
+        runner = CliRunner()
+        archive_result = _make_archive_result(cfg, "2603")
+        with (
+            patch("src.cli.load", return_value=cfg),
+            patch("src.cli.archive_cycle", return_value=archive_result),
+            patch("src.cli._collect_files", return_value=([], ["EG-ENR-3.2-en-GB.html"])),
+        ):
+            result = runner.invoke(cli, ["archive", "--cycle", "2603"])
+        assert "EG-ENR-3.2-en-GB.html" in result.output
 
     def test_archiver_error_exits_nonzero(self, tmp_path):
         cfg = _make_config(tmp_path)
         runner = CliRunner()
         with (
             patch("src.cli.load", return_value=cfg),
-            patch("src.cli.archive_cycle", side_effect=ArchiverError("out.json missing")),
+            patch("src.cli.archive_cycle", side_effect=ArchiverError("git add failed")),
+            patch("src.cli._collect_files", return_value=([], [])),
         ):
             result = runner.invoke(cli, ["archive", "--cycle", "2603"])
         assert result.exit_code != 0
@@ -114,10 +139,11 @@ class TestArchiveCommand:
         runner = CliRunner()
         with (
             patch("src.cli.load", return_value=cfg),
-            patch("src.cli.archive_cycle", side_effect=ArchiverError("out.json missing")),
+            patch("src.cli.archive_cycle", side_effect=ArchiverError("git add failed")),
+            patch("src.cli._collect_files", return_value=([], [])),
         ):
             result = runner.invoke(cli, ["archive", "--cycle", "2603"])
-        assert "out.json missing" in result.output
+        assert "git add failed" in result.output
 
     def test_config_error_exits_nonzero(self, tmp_path):
         runner = CliRunner()
@@ -128,12 +154,12 @@ class TestArchiveCommand:
     def test_default_cycle_used_when_no_option(self, tmp_path):
         cfg = _make_config(tmp_path)
         runner = CliRunner()
-        zip_p = cfg.archive_repo / "vFPC 2602" / "vFPC 2602.zip"
-        manifest_p = cfg.archive_repo / "vFPC 2602" / "manifest.md"
+        archive_result = _make_archive_result(cfg, "2602")
         with (
             patch("src.cli.load", return_value=cfg),
             patch("src.cli.current_cycle", return_value=CYCLE_2602),
-            patch("src.cli.archive_cycle", return_value=(zip_p, manifest_p)),
+            patch("src.cli.archive_cycle", return_value=archive_result),
+            patch("src.cli._collect_files", return_value=([], [])),
         ):
             result = runner.invoke(cli, ["archive"])
         assert "2602" in result.output
@@ -141,11 +167,11 @@ class TestArchiveCommand:
     def test_archive_cycle_called_with_correct_args(self, tmp_path):
         cfg = _make_config(tmp_path)
         runner = CliRunner()
-        zip_p = cfg.archive_repo / "vFPC 2603" / "vFPC 2603.zip"
-        manifest_p = cfg.archive_repo / "vFPC 2603" / "manifest.md"
+        archive_result = _make_archive_result(cfg, "2603")
         with (
             patch("src.cli.load", return_value=cfg),
-            patch("src.cli.archive_cycle", return_value=(zip_p, manifest_p)) as mock_archive,
+            patch("src.cli.archive_cycle", return_value=archive_result) as mock_archive,
+            patch("src.cli._collect_files", return_value=([], [])),
         ):
             runner.invoke(cli, ["archive", "--cycle", "2603"])
         args = mock_archive.call_args[0]
@@ -155,11 +181,11 @@ class TestArchiveCommand:
     def test_cycle_dir_is_vfpc_subdir_of_workspace(self, tmp_path):
         cfg = _make_config(tmp_path)
         runner = CliRunner()
-        zip_p = cfg.archive_repo / "vFPC 2603" / "vFPC 2603.zip"
-        manifest_p = cfg.archive_repo / "vFPC 2603" / "manifest.md"
+        archive_result = _make_archive_result(cfg, "2603")
         with (
             patch("src.cli.load", return_value=cfg),
-            patch("src.cli.archive_cycle", return_value=(zip_p, manifest_p)) as mock_archive,
+            patch("src.cli.archive_cycle", return_value=archive_result) as mock_archive,
+            patch("src.cli._collect_files", return_value=([], [])),
         ):
             runner.invoke(cli, ["archive", "--cycle", "2603"])
         cycle_dir_arg = mock_archive.call_args[0][1]
