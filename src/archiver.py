@@ -75,6 +75,10 @@ _EXCLUDE_PATTERNS = [
 # Directory names — any entry whose path component matches is excluded entirely.
 _EXCLUDE_DIRS = {".idea", "__pycache__", ".git", "node_modules"}
 
+# Minimum number of expected files that must be present before archiving proceeds.
+# Fewer than this indicates a missing or wrong cycle directory, not just an incomplete cycle.
+_MIN_EXPECTED_PRESENT = 3
+
 
 # ---------------------------------------------------------------------------
 # Exceptions
@@ -122,16 +126,52 @@ def _collect_files(cycle_dir: Path, cycle: AiracCycle) -> tuple[list[Path], list
     Returns a ``(files, warnings)`` tuple where:
     - ``files`` is the list of Paths to archive (sorted by name)
     - ``warnings`` lists the names of expected files that are absent
+
+    Raises:
+        ArchiverError: if *cycle_dir* does not exist, or if duplicate basenames
+            are found among the collected files (flat copy would silently overwrite),
+            or if fewer than ``_MIN_EXPECTED_PRESENT`` expected files are present
+            (indicates a wrong or missing cycle directory).
     """
+    if not cycle_dir.is_dir():
+        raise ArchiverError(
+            f"Cycle directory does not exist: {cycle_dir}\n"
+            "Check workspace_base in config and the cycle ident."
+        )
+
     all_files = sorted(
         p for p in cycle_dir.rglob("*")
         if p.is_file() and not _is_excluded(p, cycle_dir)
     )
 
+    # Detect duplicate basenames — flat copy would silently overwrite
+    seen: dict[str, Path] = {}
+    duplicates: list[str] = []
+    for p in all_files:
+        if p.name in seen:
+            duplicates.append(f"  {seen[p.name].relative_to(cycle_dir)}  vs  {p.relative_to(cycle_dir)}")
+        else:
+            seen[p.name] = p
+    if duplicates:
+        raise ArchiverError(
+            f"Duplicate basenames found in {cycle_dir} — flat archive would overwrite files:\n"
+            + "\n".join(duplicates)
+            + "\nRename or remove the duplicates before archiving."
+        )
+
     # Check for expected files and build warnings
     present_names = {p.name for p in all_files}
     expected = _EXPECTED_FIXED + [_sct_basename(cycle)]
     warnings = [name for name in expected if name not in present_names]
+
+    # Guard against archiving a wrong or empty directory
+    expected_present = len(expected) - len(warnings)
+    if expected_present < _MIN_EXPECTED_PRESENT:
+        raise ArchiverError(
+            f"Only {expected_present} of {len(expected)} expected files found in {cycle_dir}. "
+            f"At least {_MIN_EXPECTED_PRESENT} must be present. "
+            "Check that this is the correct cycle directory."
+        )
 
     return all_files, warnings
 
@@ -239,12 +279,20 @@ def archive_cycle(
         A ``(copied_paths, manifest_path)`` tuple.
 
     Raises:
-        ArchiverError: if ``git add`` fails.
+        ArchiverError: if *cycle_dir* does not exist, if duplicate basenames are
+            found, if fewer than ``_MIN_EXPECTED_PRESENT`` expected files are present,
+            or if ``git add`` fails.
     """
     files, warnings = _collect_files(cycle_dir, cycle)
 
     subdir = archive_repo / _archive_dir_name(cycle)
-    subdir.mkdir(parents=True, exist_ok=True)
+
+    # Remove any previously archived files so a re-run leaves no stale content.
+    # This ensures the archive directory always exactly reflects the current cycle_dir.
+    if subdir.exists():
+        shutil.rmtree(subdir)
+    subdir.mkdir(parents=True)
+
     manifest_path = subdir / "manifest.md"
 
     # Write manifest alongside the source files so its checksum is not

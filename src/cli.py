@@ -70,7 +70,7 @@ def _resolve_cycle(ident: str | None) -> AiracCycle:
 
 
 def _abort(message: str) -> None:
-    click.echo(f"\nError: {message}", err=True)
+    click.secho(f"\nError: {message}", fg="red", err=True)
     sys.exit(1)
 
 
@@ -108,13 +108,19 @@ def archive(cycle: str | None) -> None:
     click.echo(f"Working dir:  {cycle_dir}")
     click.echo(f"Archive repo: {cfg.archive_repo}\n")
 
-    # Surface warnings before archiving so the operator can see them clearly
-    _, warnings = _collect_files(cycle_dir, target)
+    # Pre-flight check: collect files once and surface any hard errors or warnings
+    # before touching the archive repo.  ArchiverError here means wrong/missing
+    # directory — abort with a clear message rather than a Python traceback.
+    try:
+        _, warnings = _collect_files(cycle_dir, target)
+    except ArchiverError as exc:
+        _abort(str(exc))
+
     if warnings:
-        click.echo("  Warnings — expected files not found:", err=True)
+        click.secho("  WARNING — expected files not found:", fg="yellow", err=True)
         for name in warnings:
-            click.echo(f"    MISSING: {name}", err=True)
-        click.echo("  Proceeding with incomplete archive.\n", err=True)
+            click.secho(f"    MISSING: {name}", fg="yellow", err=True)
+        click.secho("  Proceeding with incomplete archive.\n", fg="yellow", err=True)
 
     click.echo("  Collecting files, writing manifest, copying, staging...", nl=False)
     try:

@@ -212,18 +212,43 @@ class TestCollectFiles:
         assert "out.json" in warnings
         assert "in.json" in warnings
 
-    def test_no_error_on_empty_dir(self, tmp_path):
+    def test_raises_on_empty_dir(self, tmp_path):
+        # An empty cycle dir is almost certainly wrong — must fail, not silently archive nothing
         cycle_dir = _make_cycle_dir(tmp_path, [])
-        files, warnings = _collect_files(cycle_dir, CYCLE_2602)
-        assert files == []
-        # All expected files should be warned about (_EXPECTED_FILES already includes SCT)
-        assert len(warnings) == len(_EXPECTED_FILES)
+        with pytest.raises(ArchiverError, match="expected files found"):
+            _collect_files(cycle_dir, CYCLE_2602)
 
     def test_returns_only_files_not_dirs(self, tmp_path):
         cycle_dir = _make_cycle_dir(tmp_path, _EXPECTED_FILES)
         files, _ = _collect_files(cycle_dir, CYCLE_2602)
         for p in files:
             assert p.is_file()
+
+    def test_raises_when_cycle_dir_does_not_exist(self, tmp_path):
+        missing_dir = tmp_path / "vFPC 9999"
+        with pytest.raises(ArchiverError, match="does not exist"):
+            _collect_files(missing_dir, CYCLE_2602)
+
+    def test_raises_on_duplicate_basenames(self, tmp_path):
+        cycle_dir = _make_cycle_dir(tmp_path, _EXPECTED_FILES)
+        # Create a subdirectory with a file whose basename clashes with a root file
+        (cycle_dir / "subdir").mkdir()
+        (cycle_dir / "subdir" / "out.json").write_text("duplicate", encoding="utf-8")
+        with pytest.raises(ArchiverError, match="Duplicate basenames"):
+            _collect_files(cycle_dir, CYCLE_2602)
+
+    def test_raises_when_too_few_expected_files(self, tmp_path):
+        # Only 2 expected files present — below MIN_EXPECTED_PRESENT (3)
+        cycle_dir = _make_cycle_dir(tmp_path, ["Routes.csv", "Notes.csv"])
+        with pytest.raises(ArchiverError, match="expected files found"):
+            _collect_files(cycle_dir, CYCLE_2602)
+
+    def test_does_not_raise_when_min_expected_present(self, tmp_path):
+        # Exactly 3 expected files — should warn but not raise
+        cycle_dir = _make_cycle_dir(tmp_path, ["Routes.csv", "Notes.csv", "out.json"])
+        files, warnings = _collect_files(cycle_dir, CYCLE_2602)
+        assert len(files) == 3
+        assert len(warnings) > 0  # missing files are warned about
 
 
 # ---------------------------------------------------------------------------
@@ -449,6 +474,48 @@ class TestArchiveCycle:
         names = {p.name for p in copied}
         assert "audit_decisions.md" in names
         assert "What's changed.csv" in names
+
+    def test_raises_when_cycle_dir_missing(self, tmp_path):
+        archive_repo = tmp_path / "airac-data"
+        archive_repo.mkdir()
+        missing_dir = tmp_path / "vFPC 9999"
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value.returncode = 0
+            with pytest.raises(ArchiverError, match="does not exist"):
+                archive_cycle(CYCLE_2602, missing_dir, archive_repo)
+
+    def test_raises_on_duplicate_basenames(self, tmp_path):
+        cycle_dir = _make_cycle_dir(tmp_path, _EXPECTED_FILES)
+        (cycle_dir / "subdir").mkdir()
+        (cycle_dir / "subdir" / "out.json").write_text("dup", encoding="utf-8")
+        archive_repo = tmp_path / "airac-data"
+        archive_repo.mkdir()
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value.returncode = 0
+            with pytest.raises(ArchiverError, match="Duplicate basenames"):
+                archive_cycle(CYCLE_2602, cycle_dir, archive_repo)
+
+    def test_rerun_removes_stale_files(self, tmp_path):
+        """Re-archiving a cycle must not leave files from the previous run."""
+        # First run: full set including an extra file
+        first_files = _EXPECTED_FILES + ["stale_extra.txt"]
+        cycle_dir = _make_cycle_dir(tmp_path, first_files)
+        archive_repo = tmp_path / "airac-data"
+        archive_repo.mkdir()
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value.returncode = 0
+            archive_cycle(CYCLE_2602, cycle_dir, archive_repo)
+        subdir = archive_repo / "vFPC 2602"
+        assert (subdir / "stale_extra.txt").exists()
+
+        # Second run: stale_extra.txt removed from cycle_dir
+        (cycle_dir / "stale_extra.txt").unlink()
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value.returncode = 0
+            archive_cycle(CYCLE_2602, cycle_dir, archive_repo)
+        assert not (subdir / "stale_extra.txt").exists(), (
+            "Stale file from previous archive run was not removed on re-archive"
+        )
 
     def test_succeeds_with_missing_expected_file(self, tmp_path):
         # Missing ENR 3.2 — should NOT raise, just warn
