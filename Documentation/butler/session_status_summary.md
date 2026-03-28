@@ -4,61 +4,41 @@
 
 ## Session 1 — 2026-03-11
 
-### Context
+**Repository created** by extracting the archiver from `airac-data-fetcher`.
 
-The archiver was originally developed inside `airac-data-fetcher` as
-`src/archive/archiver.py` during Sessions 8–9 of that project. It was difficult
-to discover there and logically belonged in its own repository. Session 1 of
-this project created the new standalone repo.
+- `src/archiver.py` — zip-based archiving of 7 required files
+- `src/config.py` — YAML config loader
+- `src/cli.py` — Click CLI with `archive` command
+- `src/airac.py` — AIRAC cycle date arithmetic (from fetcher)
+- 110 tests, all passing
+- Butler documentation created
 
-### Work completed
+---
 
-**Repository created:**
-- Directory structure: `src/`, `tests/`, `Documentation/butler/`
-- `.gitignore`, `requirements.txt`, `config.yaml`
+## Session 10 — 2026-03-20 (v2, PR #2)
 
-**Source files:**
+**Major refactor: flat files, denylist, checksums.**
 
-- `src/airac.py` — Copied verbatim from `airac-data-fetcher`. Self-contained
-  date arithmetic with no external dependencies. Provides `AiracCycle`,
-  `cycle_for_date`, and `current_cycle`.
+- Replaced zip archiving with flat-file copy
+- Added denylist-based file filtering (exclude known non-canonical files)
+- Added SHA256 checksums in `manifest.md`
+- Added warn-on-missing (yellow CLI), nonexistent-dir guard, duplicate-basename guard
+- Clean re-archive (`rmtree` before copy) — stale files removed automatically
+- Ari review incorporated: rollback guarantee, error visibility improvements
+- PR #2 merged to `main`
 
-- `src/archiver.py` — Adapted from `airac-data-fetcher/src/archive/archiver.py`.
-  Import path updated from `src.archive.archiver` to `src.archiver`. Core logic
-  unchanged: collects 7 required files, creates zip (flat layout, ZIP_DEFLATED),
-  writes manifest.md, runs `git add`.
+---
 
-- `src/config.py` — New, simplified config loader. Only two keys:
-  `workspace_base` and `archive_repo`. Supports `config.local.yaml` override.
-  Raises `ConfigError` on missing/empty values.
+## Session 28 — 2026-03-28 (v3, PR #4)
 
-- `src/cli.py` — New CLI using Click. Single `archive` subcommand with
-  `--cycle YYNN` option. `_resolve_cycle` handles ident parsing and validation.
-  `_abort` for clean error exit.
+**Allowlist + versioned out.json (issue #3).**
 
-- `src/__main__.py` — Entry point enabling `python -m src archive`.
-
-**Tests (110 total, all green):**
-
-- `tests/test_airac.py` — 29 tests (copied from fetcher)
-- `tests/test_archiver.py` — 45 tests (adapted; import path updated)
-- `tests/test_config.py` — 14 tests (new; covers all error cases)
-- `tests/test_cli.py` — 17 tests (new; covers archive command, resolve cycle, help, errors)
-- `tests/test_rules_db.py` — 2 tests (validates RULE: tag convention; skips if rules DB not found)
-
-**Documentation:**
-- `README.md` — Full user and developer documentation
-- `Documentation/butler/` — This suite of butler files
-
-**Also completed in the same session (in `airac-data-fetcher`):**
-- Removed `src/archive/archiver.py` and `tests/test_archiver.py`
-- Removed `archive` subcommand from `src/cli.py`
-- Removed `archive_repo` from `src/config.py` and `config.yaml`
-- Updated all affected tests and documentation
-- Committed both repositories with clean history
-
-**Rules database and data dictionary (added in follow-up):**
-- Added `tests/test_rules_db.py` — validates the `[RULE:...]` tagging convention; skips if `vFPC-Rules-Database` is not found as a sibling repo
-- The archiver uses 0 `[RULE:...]` tags (it packages files, not aviation policy); test passes trivially and acts as a future guard
-- Added `airac-archiver Files` column to `vFPC-Rules-Database/Documentation/rules_reference.md` (all `—`)
-- Added **Rules database** and **Data dictionary** sections to `next_session_prompt.md` so future AI sessions have full ecosystem context
+- Switched from denylist to explicit allowlist: `in.json`, `out.json`, `Routes.csv`, `Notes.csv`, `*.sct`
+- `out.json` renamed to `out.{cycle}.{n}.json` with monotonic version numbering
+- Existing versioned files preserved across re-archives using atomic temp-dir strategy (`shutil.move` + `tempfile.mkdtemp`)
+- Ari review incorporated: temp-dir robustness (replaced in-memory `read_bytes`), gap-in-versions test, preserve-without-out test, Windows backslash path traversal edge case (Go side)
+- Documentation and CLI docstrings updated to reflect flat-file + allowlist reality
+- `airac-data` re-archived for AIRAC 2603: 14 non-allowlisted files cleaned, `out.json` versioned to `out.2603.1.json`
+- UKVFPCAPI filename validation regex updated to accept versioned filenames (PR #93 merged)
+- PR #4 merged, issue #3 closed
+- All GitHub issues now closed
