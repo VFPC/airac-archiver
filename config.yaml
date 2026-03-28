@@ -10,6 +10,6 @@
 workspace_base: ""
 
 # Path to your local clone of VFPC/airac-data.
-# The archiver writes the zip and manifest here, then runs git add.
+# The archiver copies flat files and manifest here, then runs git add.
 # Set in config.local.yaml.
 archive_repo: ""

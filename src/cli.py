@@ -11,9 +11,10 @@ The ``archive`` command:
 1. Resolves the target AIRAC cycle (defaults to the current cycle).
 2. Locates the cycle working directory under ``workspace_base``
    (``vFPC YYNN/`` — e.g. ``vFPC 2603/``).
-3. Collects all seven required files from that directory.
-4. Creates ``{archive_repo}/vFPC YYNN/vFPC YYNN.zip`` and ``manifest.md``.
-5. Runs ``git add`` to stage both files for review before committing.
+3. Collects allowlisted files from that directory (see ``archiver.py``).
+4. Copies them as flat files into ``{archive_repo}/vFPC YYNN/``,
+   renaming ``out.json`` to ``out.{ident}.{n}.json``, writes ``manifest.md``.
+5. Runs ``git add`` to stage all files for review before committing.
 
 Run this command after the SRD Parser has written ``out.json`` into
 the cycle working directory.
@@ -76,7 +77,7 @@ def _abort(message: str) -> None:
 
 @click.group()
 def cli() -> None:
-    """AIRAC Archiver — zip and stage prepared cycle files for airac-data."""
+    """AIRAC Archiver — collect and stage prepared cycle files for airac-data."""
 
 
 @cli.command()
@@ -87,7 +88,7 @@ def cli() -> None:
     help="AIRAC cycle ident to archive (e.g. 2603). Defaults to the current cycle.",
 )
 def archive(cycle: str | None) -> None:
-    """Zip prepared cycle files and stage them in the airac-data repo.
+    """Collect allowlisted cycle files and stage them in the airac-data repo.
 
     Requires that the SRD Parser has been run so that out.json is present
     in the cycle working directory.
