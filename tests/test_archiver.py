@@ -12,12 +12,17 @@ import pytest
 from src.airac import cycle_for_date
 from src.archiver import (
     ArchiverError,
+    _ALLOWED_FIXED,
+    _OUT_VERSION_RE,
     _archive_dir_name,
     _collect_files,
     _copy_files,
     _create_manifest,
+    _existing_out_versions,
     _git_stage,
-    _is_excluded,
+    _is_allowed,
+    _next_out_version,
+    _out_version_name,
     _sha256,
     _sct_basename,
     archive_cycle,
@@ -30,47 +35,42 @@ from src.archiver import (
 CYCLE_2602 = cycle_for_date(date(2026, 2, 19))
 CYCLE_2601 = cycle_for_date(date(2026, 1, 22))
 
-_EXPECTED_FILES = [
+# The canonical allowlisted files for CYCLE_2602.
+_ALLOWED_FILES = [
     "Routes.csv",
     "Notes.csv",
-    "EG-ENR-3.2-en-GB.html",
-    "EG-ENR-3.3-en-GB.html",
     "in.json",
     "out.json",
-    "aip_segments.json",
     "UK_2026_02.sct",
 ]
 
-_EXTRA_FILES = [
-    "What's changed.csv",
-    "audit_decisions.md",
-    "discord_announcement.md",
-    "logs/log_20260219_0900.txt",
-]
-
-_EXCLUDED_FILES = [
+# Files that should be silently ignored (not on the allowlist).
+_NON_ALLOWED_FILES = [
+    "EG-ENR-3.2-en-GB.html",
+    "EG-ENR-3.3-en-GB.html",
+    "aip_segments.json",
     "UK and Ireland SRD_March_2026.xlsx",
     "output_20260219_090000.json",
-    "vFPC 2602.iml",
-    "workspace.xml",
-    ".gitignore",
+    "audit_decisions.md",
+    "What's changed.csv",
+    "log_20260219_0900.txt",
+    "discord_announcement.md",
 ]
 
 
 def _make_cycle_dir(tmp_path: Path, filenames: list[str]) -> Path:
-    """Create a cycle directory with the given files (supports subdirectories)."""
+    """Create a cycle directory with the given files."""
     cycle_dir = tmp_path / "vFPC 2602"
     cycle_dir.mkdir()
     for name in filenames:
         p = cycle_dir / name
-        p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(f"content of {name}", encoding="utf-8")
     return cycle_dir
 
 
 def _make_full_cycle_dir(tmp_path: Path) -> Path:
-    """Create a realistic cycle directory with expected, extra, and excluded files."""
-    return _make_cycle_dir(tmp_path, _EXPECTED_FILES + _EXTRA_FILES + _EXCLUDED_FILES)
+    """Create a realistic cycle directory with allowed and non-allowed files."""
+    return _make_cycle_dir(tmp_path, _ALLOWED_FILES + _NON_ALLOWED_FILES)
 
 
 # ---------------------------------------------------------------------------
@@ -104,63 +104,133 @@ class TestSctBasename:
 
 
 # ---------------------------------------------------------------------------
-# _is_excluded
+# Versioned out.json helpers
 # ---------------------------------------------------------------------------
 
-class TestIsExcluded:
-    def test_xlsx_excluded(self, tmp_path):
-        cycle_dir = tmp_path / "vFPC 2602"
-        cycle_dir.mkdir()
-        p = cycle_dir / "SRD_March.xlsx"
-        assert _is_excluded(p, cycle_dir)
+class TestOutVersionName:
+    def test_format(self):
+        assert _out_version_name(CYCLE_2602, 1) == "out.2602.1.json"
 
-    def test_timestamped_json_excluded(self, tmp_path):
-        cycle_dir = tmp_path / "vFPC 2602"
-        cycle_dir.mkdir()
-        p = cycle_dir / "output_20260219_090000.json"
-        assert _is_excluded(p, cycle_dir)
+    def test_double_digit_version(self):
+        assert _out_version_name(CYCLE_2602, 12) == "out.2602.12.json"
 
-    def test_iml_excluded(self, tmp_path):
-        cycle_dir = tmp_path / "vFPC 2602"
-        cycle_dir.mkdir()
-        p = cycle_dir / "vFPC 2602.iml"
-        assert _is_excluded(p, cycle_dir)
+    def test_different_cycle(self):
+        assert _out_version_name(CYCLE_2601, 3) == "out.2601.3.json"
 
-    def test_xml_excluded(self, tmp_path):
-        cycle_dir = tmp_path / "vFPC 2602"
-        cycle_dir.mkdir()
-        p = cycle_dir / "workspace.xml"
-        assert _is_excluded(p, cycle_dir)
 
-    def test_idea_dir_excluded(self, tmp_path):
-        cycle_dir = tmp_path / "vFPC 2602"
-        cycle_dir.mkdir()
-        p = cycle_dir / ".idea" / "misc.xml"
-        assert _is_excluded(p, cycle_dir)
+class TestOutVersionRE:
+    def test_matches_valid_name(self):
+        assert _OUT_VERSION_RE.match("out.2602.1.json")
 
-    def test_routes_csv_not_excluded(self, tmp_path):
-        cycle_dir = tmp_path / "vFPC 2602"
-        cycle_dir.mkdir()
-        p = cycle_dir / "Routes.csv"
-        assert not _is_excluded(p, cycle_dir)
+    def test_captures_ident_and_version(self):
+        m = _OUT_VERSION_RE.match("out.2603.5.json")
+        assert m.group(1) == "2603"
+        assert m.group(2) == "5"
 
-    def test_out_json_not_excluded(self, tmp_path):
-        cycle_dir = tmp_path / "vFPC 2602"
-        cycle_dir.mkdir()
-        p = cycle_dir / "out.json"
-        assert not _is_excluded(p, cycle_dir)
+    def test_rejects_plain_out_json(self):
+        assert not _OUT_VERSION_RE.match("out.json")
 
-    def test_log_file_not_excluded(self, tmp_path):
-        cycle_dir = tmp_path / "vFPC 2602"
-        cycle_dir.mkdir()
-        p = cycle_dir / "logs" / "log_20260219_0900.txt"
-        assert not _is_excluded(p, cycle_dir)
+    def test_rejects_output_timestamped(self):
+        assert not _OUT_VERSION_RE.match("output_20260219_090000.json")
 
-    def test_audit_md_not_excluded(self, tmp_path):
-        cycle_dir = tmp_path / "vFPC 2602"
-        cycle_dir.mkdir()
-        p = cycle_dir / "audit_decisions.md"
-        assert not _is_excluded(p, cycle_dir)
+    def test_rejects_wrong_prefix(self):
+        assert not _OUT_VERSION_RE.match("data.2602.1.json")
+
+
+class TestExistingOutVersions:
+    def test_empty_dir(self, tmp_path):
+        assert _existing_out_versions(tmp_path, CYCLE_2602) == []
+
+    def test_nonexistent_dir(self, tmp_path):
+        assert _existing_out_versions(tmp_path / "nope", CYCLE_2602) == []
+
+    def test_finds_matching_versions(self, tmp_path):
+        (tmp_path / "out.2602.1.json").write_text("v1")
+        (tmp_path / "out.2602.2.json").write_text("v2")
+        result = _existing_out_versions(tmp_path, CYCLE_2602)
+        assert [p.name for p in result] == ["out.2602.1.json", "out.2602.2.json"]
+
+    def test_ignores_other_cycle(self, tmp_path):
+        (tmp_path / "out.2601.1.json").write_text("other cycle")
+        (tmp_path / "out.2602.1.json").write_text("this cycle")
+        result = _existing_out_versions(tmp_path, CYCLE_2602)
+        assert [p.name for p in result] == ["out.2602.1.json"]
+
+    def test_sorted_by_version_number(self, tmp_path):
+        (tmp_path / "out.2602.10.json").write_text("v10")
+        (tmp_path / "out.2602.2.json").write_text("v2")
+        (tmp_path / "out.2602.1.json").write_text("v1")
+        result = _existing_out_versions(tmp_path, CYCLE_2602)
+        assert [p.name for p in result] == [
+            "out.2602.1.json", "out.2602.2.json", "out.2602.10.json"
+        ]
+
+
+class TestNextOutVersion:
+    def test_first_version_in_empty_dir(self, tmp_path):
+        assert _next_out_version(tmp_path, CYCLE_2602) == 1
+
+    def test_increments_after_existing(self, tmp_path):
+        (tmp_path / "out.2602.1.json").write_text("v1")
+        assert _next_out_version(tmp_path, CYCLE_2602) == 2
+
+    def test_increments_after_multiple(self, tmp_path):
+        (tmp_path / "out.2602.1.json").write_text("v1")
+        (tmp_path / "out.2602.2.json").write_text("v2")
+        (tmp_path / "out.2602.3.json").write_text("v3")
+        assert _next_out_version(tmp_path, CYCLE_2602) == 4
+
+    def test_ignores_other_cycle(self, tmp_path):
+        (tmp_path / "out.2601.5.json").write_text("other")
+        assert _next_out_version(tmp_path, CYCLE_2602) == 1
+
+    def test_nonexistent_dir_returns_1(self, tmp_path):
+        assert _next_out_version(tmp_path / "nope", CYCLE_2602) == 1
+
+    def test_gap_in_versions_uses_max_plus_one(self, tmp_path):
+        """Deleted v2 with v3 remaining → next must be 4, never reuse 2."""
+        (tmp_path / "out.2602.1.json").write_text("v1")
+        # v2 was deleted
+        (tmp_path / "out.2602.3.json").write_text("v3")
+        assert _next_out_version(tmp_path, CYCLE_2602) == 4
+
+
+# ---------------------------------------------------------------------------
+# _is_allowed
+# ---------------------------------------------------------------------------
+
+class TestIsAllowed:
+    def test_routes_csv_allowed(self):
+        allowed = set(_ALLOWED_FIXED) | {"UK_2026_02.sct"}
+        assert _is_allowed(Path("Routes.csv"), allowed)
+
+    def test_out_json_allowed(self):
+        allowed = set(_ALLOWED_FIXED) | {"UK_2026_02.sct"}
+        assert _is_allowed(Path("out.json"), allowed)
+
+    def test_sct_allowed(self):
+        allowed = set(_ALLOWED_FIXED) | {"UK_2026_02.sct"}
+        assert _is_allowed(Path("UK_2026_02.sct"), allowed)
+
+    def test_xlsx_not_allowed(self):
+        allowed = set(_ALLOWED_FIXED) | {"UK_2026_02.sct"}
+        assert not _is_allowed(Path("SRD_March.xlsx"), allowed)
+
+    def test_enr_html_not_allowed(self):
+        allowed = set(_ALLOWED_FIXED) | {"UK_2026_02.sct"}
+        assert not _is_allowed(Path("EG-ENR-3.2-en-GB.html"), allowed)
+
+    def test_aip_segments_not_allowed(self):
+        allowed = set(_ALLOWED_FIXED) | {"UK_2026_02.sct"}
+        assert not _is_allowed(Path("aip_segments.json"), allowed)
+
+    def test_log_file_not_allowed(self):
+        allowed = set(_ALLOWED_FIXED) | {"UK_2026_02.sct"}
+        assert not _is_allowed(Path("log_20260219_0900.txt"), allowed)
+
+    def test_audit_md_not_allowed(self):
+        allowed = set(_ALLOWED_FIXED) | {"UK_2026_02.sct"}
+        assert not _is_allowed(Path("audit_decisions.md"), allowed)
 
 
 # ---------------------------------------------------------------------------
@@ -168,58 +238,44 @@ class TestIsExcluded:
 # ---------------------------------------------------------------------------
 
 class TestCollectFiles:
-    def test_collects_expected_and_extra_files(self, tmp_path):
+    def test_collects_only_allowlisted_files(self, tmp_path):
         cycle_dir = _make_full_cycle_dir(tmp_path)
         files, _ = _collect_files(cycle_dir, CYCLE_2602)
         names = {p.name for p in files}
-        for name in _EXPECTED_FILES + ["What's changed.csv", "audit_decisions.md"]:
-            assert name in names
+        assert names == set(_ALLOWED_FILES)
 
-    def test_excludes_xlsx(self, tmp_path):
+    def test_ignores_non_allowlisted_files(self, tmp_path):
         cycle_dir = _make_full_cycle_dir(tmp_path)
         files, _ = _collect_files(cycle_dir, CYCLE_2602)
         names = {p.name for p in files}
-        assert not any(n.endswith(".xlsx") for n in names)
-
-    def test_excludes_timestamped_json(self, tmp_path):
-        cycle_dir = _make_full_cycle_dir(tmp_path)
-        files, _ = _collect_files(cycle_dir, CYCLE_2602)
-        names = {p.name for p in files}
-        assert not any(n.startswith("output_") for n in names)
-
-    def test_excludes_idea_dir(self, tmp_path):
-        cycle_dir = _make_cycle_dir(tmp_path, _EXPECTED_FILES)
-        (cycle_dir / ".idea").mkdir()
-        (cycle_dir / ".idea" / "misc.xml").write_text("x")
-        files, _ = _collect_files(cycle_dir, CYCLE_2602)
-        assert not any(".idea" in str(p) for p in files)
+        for name in _NON_ALLOWED_FILES:
+            assert name not in names
 
     def test_no_warnings_when_all_expected_present(self, tmp_path):
-        cycle_dir = _make_cycle_dir(tmp_path, _EXPECTED_FILES)
+        cycle_dir = _make_cycle_dir(tmp_path, _ALLOWED_FILES)
         _, warnings = _collect_files(cycle_dir, CYCLE_2602)
         assert warnings == []
 
-    def test_warns_on_missing_enr32(self, tmp_path):
-        present = [f for f in _EXPECTED_FILES if f != "EG-ENR-3.2-en-GB.html"]
+    def test_warns_on_missing_sct(self, tmp_path):
+        present = [f for f in _ALLOWED_FILES if f != "UK_2026_02.sct"]
         cycle_dir = _make_cycle_dir(tmp_path, present)
         _, warnings = _collect_files(cycle_dir, CYCLE_2602)
-        assert "EG-ENR-3.2-en-GB.html" in warnings
+        assert "UK_2026_02.sct" in warnings
 
     def test_warns_on_multiple_missing(self, tmp_path):
-        present = [f for f in _EXPECTED_FILES if f not in ("out.json", "in.json")]
+        present = [f for f in _ALLOWED_FILES if f not in ("out.json", "in.json")]
         cycle_dir = _make_cycle_dir(tmp_path, present)
         _, warnings = _collect_files(cycle_dir, CYCLE_2602)
         assert "out.json" in warnings
         assert "in.json" in warnings
 
     def test_raises_on_empty_dir(self, tmp_path):
-        # An empty cycle dir is almost certainly wrong — must fail, not silently archive nothing
         cycle_dir = _make_cycle_dir(tmp_path, [])
         with pytest.raises(ArchiverError, match="expected files found"):
             _collect_files(cycle_dir, CYCLE_2602)
 
     def test_returns_only_files_not_dirs(self, tmp_path):
-        cycle_dir = _make_cycle_dir(tmp_path, _EXPECTED_FILES)
+        cycle_dir = _make_cycle_dir(tmp_path, _ALLOWED_FILES)
         files, _ = _collect_files(cycle_dir, CYCLE_2602)
         for p in files:
             assert p.is_file()
@@ -229,26 +285,16 @@ class TestCollectFiles:
         with pytest.raises(ArchiverError, match="does not exist"):
             _collect_files(missing_dir, CYCLE_2602)
 
-    def test_raises_on_duplicate_basenames(self, tmp_path):
-        cycle_dir = _make_cycle_dir(tmp_path, _EXPECTED_FILES)
-        # Create a subdirectory with a file whose basename clashes with a root file
-        (cycle_dir / "subdir").mkdir()
-        (cycle_dir / "subdir" / "out.json").write_text("duplicate", encoding="utf-8")
-        with pytest.raises(ArchiverError, match="Duplicate basenames"):
-            _collect_files(cycle_dir, CYCLE_2602)
-
     def test_raises_when_too_few_expected_files(self, tmp_path):
-        # Only 2 expected files present — below MIN_EXPECTED_PRESENT (3)
         cycle_dir = _make_cycle_dir(tmp_path, ["Routes.csv", "Notes.csv"])
         with pytest.raises(ArchiverError, match="expected files found"):
             _collect_files(cycle_dir, CYCLE_2602)
 
     def test_does_not_raise_when_min_expected_present(self, tmp_path):
-        # Exactly 3 expected files — should warn but not raise
         cycle_dir = _make_cycle_dir(tmp_path, ["Routes.csv", "Notes.csv", "out.json"])
         files, warnings = _collect_files(cycle_dir, CYCLE_2602)
         assert len(files) == 3
-        assert len(warnings) > 0  # missing files are warned about
+        assert len(warnings) > 0
 
 
 # ---------------------------------------------------------------------------
@@ -284,7 +330,7 @@ class TestSha256:
 class TestCreateManifest:
     def _write_manifest(self, tmp_path: Path, warnings: list[str] = None) -> str:
         files = []
-        for name in _EXPECTED_FILES:
+        for name in _ALLOWED_FILES:
             p = tmp_path / name
             p.write_text("x", encoding="utf-8")
             files.append(p)
@@ -311,12 +357,11 @@ class TestCreateManifest:
 
     def test_lists_all_files(self, tmp_path):
         text = self._write_manifest(tmp_path)
-        for name in _EXPECTED_FILES:
+        for name in _ALLOWED_FILES:
             assert name in text
 
     def test_contains_sha256_checksums(self, tmp_path):
         text = self._write_manifest(tmp_path)
-        # SHA256 hashes are 64 hex chars
         import re
         assert re.search(r"[0-9a-f]{64}", text)
 
@@ -331,9 +376,9 @@ class TestCreateManifest:
         assert "Warnings" not in text
 
     def test_warnings_section_present_when_missing(self, tmp_path):
-        text = self._write_manifest(tmp_path, warnings=["EG-ENR-3.2-en-GB.html"])
+        text = self._write_manifest(tmp_path, warnings=["UK_2026_02.sct"])
         assert "Warnings" in text
-        assert "EG-ENR-3.2-en-GB.html" in text
+        assert "UK_2026_02.sct" in text
         assert "MISSING" in text
 
 
@@ -414,7 +459,7 @@ class TestGitStage:
 
 class TestArchiveCycle:
     def _run(self, tmp_path: Path, filenames: list[str] = None) -> tuple[list[Path], Path]:
-        cycle_dir = _make_cycle_dir(tmp_path, filenames or _EXPECTED_FILES)
+        cycle_dir = _make_cycle_dir(tmp_path, filenames or _ALLOWED_FILES)
         archive_repo = tmp_path / "airac-data"
         archive_repo.mkdir()
         with patch("subprocess.run") as mock_run:
@@ -445,35 +490,25 @@ class TestArchiveCycle:
         _, manifest_path = self._run(tmp_path)
         assert manifest_path.exists()
 
-    def test_all_expected_files_copied(self, tmp_path):
+    def test_all_allowed_files_copied(self, tmp_path):
         copied, _ = self._run(tmp_path)
         names = {p.name for p in copied}
-        for name in _EXPECTED_FILES:
-            assert name in names
+        for name in _ALLOWED_FILES:
+            if name == "out.json":
+                assert "out.2602.1.json" in names, "out.json must be versioned as out.2602.1.json"
+            else:
+                assert name in names
 
-    def test_excluded_files_not_copied(self, tmp_path):
-        all_files = _EXPECTED_FILES + _EXCLUDED_FILES
-        cycle_dir = _make_cycle_dir(tmp_path, all_files)
+    def test_non_allowed_files_not_copied(self, tmp_path):
+        cycle_dir = _make_full_cycle_dir(tmp_path)
         archive_repo = tmp_path / "airac-data"
         archive_repo.mkdir()
         with patch("subprocess.run") as mock_run:
             mock_run.return_value.returncode = 0
             copied, _ = archive_cycle(CYCLE_2602, cycle_dir, archive_repo)
         names = {p.name for p in copied}
-        for name in _EXCLUDED_FILES:
+        for name in _NON_ALLOWED_FILES:
             assert name not in names
-
-    def test_extra_files_are_included(self, tmp_path):
-        all_files = _EXPECTED_FILES + ["audit_decisions.md", "What's changed.csv"]
-        cycle_dir = _make_cycle_dir(tmp_path, all_files)
-        archive_repo = tmp_path / "airac-data"
-        archive_repo.mkdir()
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value.returncode = 0
-            copied, _ = archive_cycle(CYCLE_2602, cycle_dir, archive_repo)
-        names = {p.name for p in copied}
-        assert "audit_decisions.md" in names
-        assert "What's changed.csv" in names
 
     def test_raises_when_cycle_dir_missing(self, tmp_path):
         archive_repo = tmp_path / "airac-data"
@@ -484,55 +519,129 @@ class TestArchiveCycle:
             with pytest.raises(ArchiverError, match="does not exist"):
                 archive_cycle(CYCLE_2602, missing_dir, archive_repo)
 
-    def test_raises_on_duplicate_basenames(self, tmp_path):
-        cycle_dir = _make_cycle_dir(tmp_path, _EXPECTED_FILES)
-        (cycle_dir / "subdir").mkdir()
-        (cycle_dir / "subdir" / "out.json").write_text("dup", encoding="utf-8")
-        archive_repo = tmp_path / "airac-data"
-        archive_repo.mkdir()
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value.returncode = 0
-            with pytest.raises(ArchiverError, match="Duplicate basenames"):
-                archive_cycle(CYCLE_2602, cycle_dir, archive_repo)
-
-    def test_rerun_removes_stale_files(self, tmp_path):
-        """Re-archiving a cycle must not leave files from the previous run."""
-        # First run: full set including an extra file
-        first_files = _EXPECTED_FILES + ["stale_extra.txt"]
-        cycle_dir = _make_cycle_dir(tmp_path, first_files)
+    def test_rerun_cleans_stale_non_out_files(self, tmp_path):
+        """Re-archiving removes stale non-out files from the archive dir."""
+        cycle_dir = _make_cycle_dir(tmp_path, _ALLOWED_FILES)
         archive_repo = tmp_path / "airac-data"
         archive_repo.mkdir()
         with patch("subprocess.run") as mock_run:
             mock_run.return_value.returncode = 0
             archive_cycle(CYCLE_2602, cycle_dir, archive_repo)
         subdir = archive_repo / "vFPC 2602"
-        assert (subdir / "stale_extra.txt").exists()
-
-        # Second run: stale_extra.txt removed from cycle_dir
-        (cycle_dir / "stale_extra.txt").unlink()
+        # Manually place a stale file in the archive dir
+        (subdir / "stale.txt").write_text("leftover")
         with patch("subprocess.run") as mock_run:
             mock_run.return_value.returncode = 0
             archive_cycle(CYCLE_2602, cycle_dir, archive_repo)
-        assert not (subdir / "stale_extra.txt").exists(), (
-            "Stale file from previous archive run was not removed on re-archive"
+        assert not (subdir / "stale.txt").exists(), (
+            "Stale file must be removed on re-archive"
+        )
+
+    def test_out_json_renamed_to_versioned(self, tmp_path):
+        """out.json from the source dir should be archived as out.{ident}.1.json."""
+        copied, _ = self._run(tmp_path)
+        subdir = copied[0].parent
+        assert not (subdir / "out.json").exists(), "bare out.json must not remain"
+        assert (subdir / "out.2602.1.json").exists()
+
+    def test_out_version_increments_on_rearchive(self, tmp_path):
+        """Re-archiving must create out.{ident}.2.json and preserve version 1."""
+        cycle_dir = _make_cycle_dir(tmp_path, _ALLOWED_FILES)
+        archive_repo = tmp_path / "airac-data"
+        archive_repo.mkdir()
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value.returncode = 0
+            archive_cycle(CYCLE_2602, cycle_dir, archive_repo)
+        subdir = archive_repo / "vFPC 2602"
+        assert (subdir / "out.2602.1.json").exists()
+
+        (cycle_dir / "out.json").write_text("updated content", encoding="utf-8")
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value.returncode = 0
+            archive_cycle(CYCLE_2602, cycle_dir, archive_repo)
+        assert (subdir / "out.2602.1.json").exists(), "version 1 must be preserved"
+        assert (subdir / "out.2602.2.json").exists(), "version 2 must be created"
+        assert (subdir / "out.2602.1.json").read_text() == "content of out.json"
+        assert (subdir / "out.2602.2.json").read_text() == "updated content"
+
+    def test_out_version_preserved_contents_across_three_runs(self, tmp_path):
+        """Three archive runs should produce out.2602.{1,2,3}.json with correct contents."""
+        cycle_dir = _make_cycle_dir(tmp_path, _ALLOWED_FILES)
+        archive_repo = tmp_path / "airac-data"
+        archive_repo.mkdir()
+        subdir = archive_repo / "vFPC 2602"
+
+        for i in range(1, 4):
+            (cycle_dir / "out.json").write_text(f"version {i}", encoding="utf-8")
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value.returncode = 0
+                archive_cycle(CYCLE_2602, cycle_dir, archive_repo)
+
+        for i in range(1, 4):
+            p = subdir / f"out.2602.{i}.json"
+            assert p.exists(), f"version {i} must exist"
+            assert p.read_text() == f"version {i}"
+
+    def test_manifest_lists_all_out_versions(self, tmp_path):
+        """Manifest after re-archive must list both out versions."""
+        cycle_dir = _make_cycle_dir(tmp_path, _ALLOWED_FILES)
+        archive_repo = tmp_path / "airac-data"
+        archive_repo.mkdir()
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value.returncode = 0
+            archive_cycle(CYCLE_2602, cycle_dir, archive_repo)
+        (cycle_dir / "out.json").write_text("v2", encoding="utf-8")
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value.returncode = 0
+            _, manifest_path = archive_cycle(CYCLE_2602, cycle_dir, archive_repo)
+        text = manifest_path.read_text()
+        assert "out.2602.1.json" in text
+        assert "out.2602.2.json" in text
+
+    def test_no_out_json_skips_versioning(self, tmp_path):
+        """If out.json is absent from the source dir, versioning is a no-op."""
+        files_without_out = [f for f in _ALLOWED_FILES if f != "out.json"]
+        copied, _ = self._run(tmp_path, filenames=files_without_out)
+        subdir = copied[0].parent
+        assert not any(_OUT_VERSION_RE.match(p.name) for p in subdir.iterdir())
+
+    def test_rearchive_without_out_preserves_existing_versions(self, tmp_path):
+        """Re-archiving when source has no out.json must keep existing versions."""
+        cycle_dir = _make_cycle_dir(tmp_path, _ALLOWED_FILES)
+        archive_repo = tmp_path / "airac-data"
+        archive_repo.mkdir()
+        subdir = archive_repo / "vFPC 2602"
+
+        # First run: creates out.2602.1.json
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value.returncode = 0
+            archive_cycle(CYCLE_2602, cycle_dir, archive_repo)
+        assert (subdir / "out.2602.1.json").exists()
+
+        # Remove out.json from source and re-archive
+        (cycle_dir / "out.json").unlink()
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value.returncode = 0
+            archive_cycle(CYCLE_2602, cycle_dir, archive_repo)
+        assert (subdir / "out.2602.1.json").exists(), (
+            "Existing versioned out.json must survive re-archive even when source has no out.json"
         )
 
     def test_succeeds_with_missing_expected_file(self, tmp_path):
-        # Missing ENR 3.2 — should NOT raise, just warn
-        partial = [f for f in _EXPECTED_FILES if f != "EG-ENR-3.2-en-GB.html"]
+        partial = [f for f in _ALLOWED_FILES if f != "UK_2026_02.sct"]
         copied, manifest_path = self._run(tmp_path, filenames=partial)
         assert manifest_path.exists()
-        assert "EG-ENR-3.2-en-GB.html" not in {p.name for p in copied}
+        assert "UK_2026_02.sct" not in {p.name for p in copied}
 
     def test_manifest_records_missing_file_warning(self, tmp_path):
-        partial = [f for f in _EXPECTED_FILES if f != "EG-ENR-3.2-en-GB.html"]
+        partial = [f for f in _ALLOWED_FILES if f != "UK_2026_02.sct"]
         _, manifest_path = self._run(tmp_path, filenames=partial)
         text = manifest_path.read_text()
-        assert "EG-ENR-3.2-en-GB.html" in text
+        assert "UK_2026_02.sct" in text
         assert "MISSING" in text
 
     def test_git_add_called_once(self, tmp_path):
-        cycle_dir = _make_cycle_dir(tmp_path, _EXPECTED_FILES)
+        cycle_dir = _make_cycle_dir(tmp_path, _ALLOWED_FILES)
         archive_repo = tmp_path / "airac-data"
         archive_repo.mkdir()
         with patch("subprocess.run") as mock_run:
@@ -541,7 +650,7 @@ class TestArchiveCycle:
         assert mock_run.call_count == 1
 
     def test_git_add_stages_manifest(self, tmp_path):
-        cycle_dir = _make_cycle_dir(tmp_path, _EXPECTED_FILES)
+        cycle_dir = _make_cycle_dir(tmp_path, _ALLOWED_FILES)
         archive_repo = tmp_path / "airac-data"
         archive_repo.mkdir()
         with patch("subprocess.run") as mock_run:
@@ -551,7 +660,7 @@ class TestArchiveCycle:
         assert str(manifest_path) in cmd
 
     def test_raises_on_git_failure(self, tmp_path):
-        cycle_dir = _make_cycle_dir(tmp_path, _EXPECTED_FILES)
+        cycle_dir = _make_cycle_dir(tmp_path, _ALLOWED_FILES)
         archive_repo = tmp_path / "airac-data"
         archive_repo.mkdir()
         with patch("subprocess.run") as mock_run:

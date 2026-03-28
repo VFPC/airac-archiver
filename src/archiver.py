@@ -2,8 +2,8 @@
 
 Workflow
 --------
-1. Collect all files from the cycle working directory, excluding known noise
-   (IDE artifacts, Excel source, timestamped duplicates).
+1. Collect only allowlisted files from the cycle working directory.
+   Everything else is silently ignored.
 2. Warn about any expected files that are absent — but proceed regardless.
 3. Write a manifest.md recording cycle metadata, file list, and SHA256 checksums.
 4. Copy all collected files plus the manifest into the archive repo under
@@ -11,36 +11,47 @@ Workflow
 
 Archive layout in airac-data repo
 ----------------------------------
-``{archive_repo}/vFPC YYNN/<filename>``   — one flat file per collected file
-``{archive_repo}/vFPC YYNN/manifest.md``  — cycle metadata + checksums
+``{archive_repo}/vFPC YYNN/<filename>``             — one flat file per collected file
+``{archive_repo}/vFPC YYNN/out.YYNN.{n}.json``      — versioned parser output
+``{archive_repo}/vFPC YYNN/manifest.md``             — cycle metadata + checksums
 
-Expected files (warning if absent)
------------------------------------
-Every archive should contain these files.  Their absence is logged as a warning
-but does not prevent archiving:
+Versioned out.json
+-------------------
+The parser writes ``out.json`` into the working directory.  During archival
+this file is renamed to ``out.{ident}.{n}.json`` (e.g. ``out.2603.1.json``).
+Re-archiving the same cycle increments *n*, and all previous versions are
+preserved.  The manifest lists every version.
 
-- Routes.csv          — SRD Parser route input
-- Notes.csv           — SRD Parser notes input
-- EG-ENR-3.2-en-GB.html — AIP Parser ENR 3.2 input
-- EG-ENR-3.3-en-GB.html — AIP Parser ENR 3.3 input
-- UK_{YYYY}_{NN}.sct  — VATSIM UK sector file
+Allowlisted files
+------------------
+Only files matching these names are archived.  All other files in the working
+directory are silently ignored:
+
+- Routes.csv          — SRD route data (hard to re-obtain)
+- Notes.csv           — SRD notes data (hard to re-obtain)
+- UK_{YYYY}_{NN}.sct  — VATSIM UK sector file (hard to re-obtain)
 - in.json             — SRD Parser config input
-- out.json            — SRD Parser output
-- aip_segments.json   — AIP Parser output (MC resolution input)
+- out.json            — SRD Parser output (archived as out.YYNN.n.json)
 
-Excluded files (never archived)
---------------------------------
-- ``*.xlsx`` — NATS source Excel; superseded by Routes.csv / Notes.csv
-- ``output_*.json`` — timestamped parser duplicates; out.json is canonical
-- ``*.iml``, ``.idea/``, ``__pycache__/`` — IDE and build artefacts
+Their absence is logged as a warning but does not prevent archiving.
+
+Concurrency
+-----------
+This tool assumes **single-writer, manual invocation** — only one process
+archives a given cycle at a time.  There is no file lock or atomic-swap
+mechanism.  If two processes archive the same cycle concurrently, they may
+pick the same out.json version number or race on the rmtree/restore
+sequence, losing one run's output.
 """
 
 from __future__ import annotations
 
 import getpass
 import hashlib
+import re
 import shutil
 import subprocess
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -52,32 +63,23 @@ from src.airac import AiracCycle
 
 _DIR_PREFIX = "vFPC "
 
-# Files we warn about if absent — in the order they should appear in the manifest.
-_EXPECTED_FIXED = [
+# Allowlisted filenames (exact match).  Only these — plus the cycle-specific
+# .sct file — are collected from the working directory.  Everything else is
+# silently ignored.  This is also the expected-files list: their absence
+# triggers a warning in the manifest.
+_ALLOWED_FIXED = [
     "Routes.csv",
     "Notes.csv",
-    "EG-ENR-3.2-en-GB.html",
-    "EG-ENR-3.3-en-GB.html",
     "in.json",
     "out.json",
-    "aip_segments.json",
 ]
-
-# Glob patterns matched against each file's name — matching files are excluded.
-_EXCLUDE_PATTERNS = [
-    "*.xlsx",           # NATS source Excel
-    "output_*.json",    # timestamped parser duplicates
-    "*.iml",            # JetBrains module files
-    "*.xml",            # JetBrains workspace / inspection XML
-    "*.gitignore",      # IDE-generated gitignore
-]
-
-# Directory names — any entry whose path component matches is excluded entirely.
-_EXCLUDE_DIRS = {".idea", "__pycache__", ".git", "node_modules"}
 
 # Minimum number of expected files that must be present before archiving proceeds.
 # Fewer than this indicates a missing or wrong cycle directory, not just an incomplete cycle.
 _MIN_EXPECTED_PRESENT = 3
+
+# Versioned out.json: out.{ident}.{n}.json — e.g. out.2603.1.json
+_OUT_VERSION_RE = re.compile(r"^out\.(\d{4})\.(\d+)\.json$")
 
 
 # ---------------------------------------------------------------------------
@@ -100,38 +102,48 @@ def _sct_basename(cycle: AiracCycle) -> str:
     return f"UK_{cycle.year}_{cycle.number:02d}.sct"
 
 
-def _is_excluded(path: Path, cycle_dir: Path) -> bool:
-    """Return True if *path* should be excluded from the archive."""
-    # Exclude anything inside a blacklisted directory
-    try:
-        rel = path.relative_to(cycle_dir)
-    except ValueError:
-        return True
-    for part in rel.parts[:-1]:       # all directory components
-        if part in _EXCLUDE_DIRS:
-            return True
+def _out_version_name(cycle: AiracCycle, n: int) -> str:
+    """Return the versioned filename for out.json: ``out.{ident}.{n}.json``."""
+    return f"out.{cycle.ident}.{n}.json"
 
-    # Exclude by filename pattern
-    name = path.name
-    for pattern in _EXCLUDE_PATTERNS:
-        if path.match(pattern):
-            return True
 
-    return False
+def _existing_out_versions(directory: Path, cycle: AiracCycle) -> list[Path]:
+    """Return all ``out.{ident}.{n}.json`` files in *directory*, sorted by version."""
+    results = []
+    if not directory.is_dir():
+        return results
+    for p in directory.iterdir():
+        m = _OUT_VERSION_RE.match(p.name)
+        if m and m.group(1) == cycle.ident:
+            results.append(p)
+    return sorted(results, key=lambda p: int(_OUT_VERSION_RE.match(p.name).group(2)))
+
+
+def _next_out_version(directory: Path, cycle: AiracCycle) -> int:
+    """Return the next version number for ``out.{ident}.{n}.json`` in *directory*."""
+    existing = _existing_out_versions(directory, cycle)
+    if not existing:
+        return 1
+    last_n = int(_OUT_VERSION_RE.match(existing[-1].name).group(2))
+    return last_n + 1
+
+
+def _is_allowed(path: Path, allowed_names: set[str]) -> bool:
+    """Return True if *path*'s filename is in the allowlist."""
+    return path.name in allowed_names
 
 
 def _collect_files(cycle_dir: Path, cycle: AiracCycle) -> tuple[list[Path], list[str]]:
-    """Collect all archivable files from *cycle_dir*.
+    """Collect only allowlisted files from *cycle_dir*.
 
     Returns a ``(files, warnings)`` tuple where:
     - ``files`` is the list of Paths to archive (sorted by name)
     - ``warnings`` lists the names of expected files that are absent
 
     Raises:
-        ArchiverError: if *cycle_dir* does not exist, or if duplicate basenames
-            are found among the collected files (flat copy would silently overwrite),
-            or if fewer than ``_MIN_EXPECTED_PRESENT`` expected files are present
-            (indicates a wrong or missing cycle directory).
+        ArchiverError: if *cycle_dir* does not exist, or if fewer than
+            ``_MIN_EXPECTED_PRESENT`` expected files are present (indicates a
+            wrong or missing cycle directory).
     """
     if not cycle_dir.is_dir():
         raise ArchiverError(
@@ -139,29 +151,16 @@ def _collect_files(cycle_dir: Path, cycle: AiracCycle) -> tuple[list[Path], list
             "Check workspace_base in config and the cycle ident."
         )
 
-    all_files = sorted(
-        p for p in cycle_dir.rglob("*")
-        if p.is_file() and not _is_excluded(p, cycle_dir)
-    )
+    allowed = set(_ALLOWED_FIXED) | {_sct_basename(cycle)}
 
-    # Detect duplicate basenames — flat copy would silently overwrite
-    seen: dict[str, Path] = {}
-    duplicates: list[str] = []
-    for p in all_files:
-        if p.name in seen:
-            duplicates.append(f"  {seen[p.name].relative_to(cycle_dir)}  vs  {p.relative_to(cycle_dir)}")
-        else:
-            seen[p.name] = p
-    if duplicates:
-        raise ArchiverError(
-            f"Duplicate basenames found in {cycle_dir} — flat archive would overwrite files:\n"
-            + "\n".join(duplicates)
-            + "\nRename or remove the duplicates before archiving."
-        )
+    all_files = sorted(
+        p for p in cycle_dir.iterdir()
+        if p.is_file() and _is_allowed(p, allowed)
+    )
 
     # Check for expected files and build warnings
     present_names = {p.name for p in all_files}
-    expected = _EXPECTED_FIXED + [_sct_basename(cycle)]
+    expected = _ALLOWED_FIXED + [_sct_basename(cycle)]
     warnings = [name for name in expected if name not in present_names]
 
     # Guard against archiving a wrong or empty directory
@@ -264,11 +263,14 @@ def archive_cycle(
     cycle_dir: Path,
     archive_repo: Path,
 ) -> tuple[list[Path], Path]:
-    """Collect cycle files and stage them as flat files in the airac-data repo.
+    """Collect allowlisted cycle files and stage them in the airac-data repo.
 
-    Collects all non-excluded files from *cycle_dir*, warns about any expected
+    Collects only allowlisted files from *cycle_dir*, warns about any expected
     files that are absent, writes a manifest with SHA256 checksums, copies
     everything into ``{archive_repo}/vFPC {ident}/``, and runs ``git add``.
+
+    ``out.json`` is renamed to ``out.{ident}.{n}.json`` where *n* increments
+    on each archive run.  Previous versions are preserved across re-archives.
 
     Args:
         cycle:        The target AIRAC cycle.
@@ -287,23 +289,61 @@ def archive_cycle(
 
     subdir = archive_repo / _archive_dir_name(cycle)
 
-    # Remove any previously archived files so a re-run leaves no stale content.
-    # This ensures the archive directory always exactly reflects the current cycle_dir.
+    # Preserve previously-archived out.{ident}.{n}.json versions by moving
+    # them to a temp directory on the same filesystem, then restoring after
+    # rmtree.  This avoids holding file contents in RAM and minimises the
+    # window where data is absent from both locations.
+    tmp_hold: Path | None = None
     if subdir.exists():
+        existing_versions = _existing_out_versions(subdir, cycle)
+        if existing_versions:
+            tmp_hold = Path(tempfile.mkdtemp(
+                dir=archive_repo, prefix=".out-preserve-",
+            ))
+            for p in existing_versions:
+                shutil.move(str(p), str(tmp_hold / p.name))
         shutil.rmtree(subdir)
     subdir.mkdir(parents=True)
 
-    manifest_path = subdir / "manifest.md"
+    # Restore preserved out versions from the temp directory
+    if tmp_hold is not None:
+        for p in tmp_hold.iterdir():
+            shutil.move(str(p), str(subdir / p.name))
+        tmp_hold.rmdir()
 
-    # Write manifest alongside the source files so its checksum is not
-    # included in the file table (it can't hash itself).
-    _create_manifest(cycle, files, warnings, manifest_path)
+    # Determine the next version number for out.json and prepare the rename.
+    # _copy_files copies everything flat, so we handle the rename afterwards.
+    has_out = any(p.name == "out.json" for p in files)
+    out_version_path: Path | None = None
+    if has_out:
+        version_n = _next_out_version(subdir, cycle)
+        out_version_name = _out_version_name(cycle, version_n)
+
+    manifest_path = subdir / "manifest.md"
 
     # Copy source files into the archive subdir
     copied = _copy_files(files, subdir)
 
-    # Stage everything: copied files + manifest
-    all_staged = copied + [manifest_path]
+    # Rename out.json → out.{ident}.{n}.json
+    if has_out:
+        old_out = subdir / "out.json"
+        out_version_path = subdir / out_version_name
+        old_out.rename(out_version_path)
+        copied = [out_version_path if p.name == "out.json" else p for p in copied]
+
+    # Collect all out versions (preserved + new) for the manifest
+    all_out_versions = _existing_out_versions(subdir, cycle)
+
+    # Build the full file list for the manifest: non-out copied files + all out versions
+    manifest_files = [p for p in copied if not _OUT_VERSION_RE.match(p.name)]
+    manifest_files.extend(all_out_versions)
+
+    # Write manifest alongside the source files so its checksum is not
+    # included in the file table (it can't hash itself).
+    _create_manifest(cycle, manifest_files, warnings, manifest_path)
+
+    # Stage everything: copied files + preserved out versions + manifest
+    all_staged = copied + [p for p in all_out_versions if p not in copied] + [manifest_path]
     _git_stage(archive_repo, *all_staged)
 
     return copied, manifest_path
