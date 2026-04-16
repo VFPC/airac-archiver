@@ -32,8 +32,10 @@ directory are silently ignored:
 - UK_{YYYY}_{NN}.sct  — VATSIM UK sector file (hard to re-obtain)
 - in.json             — SRD Parser config input
 - out.json            — SRD Parser output (archived as out.YYNN.n.json)
+- curation_notes.md   — optional cycle-specific manual curation note
 
-Their absence is logged as a warning but does not prevent archiving.
+Only the required files are logged as warnings when absent; the curation note
+is archived when present and ignored when absent.
 
 Concurrency
 -----------
@@ -63,11 +65,22 @@ from src.airac import AiracCycle
 
 _DIR_PREFIX = "vFPC "
 
-# Allowlisted filenames (exact match).  Only these — plus the cycle-specific
-# .sct file — are collected from the working directory.  Everything else is
-# silently ignored.  This is also the expected-files list: their absence
-# triggers a warning in the manifest.
+# Allowlisted filenames (exact match). Only these — plus the cycle-specific
+# .sct file — are collected from the working directory. Everything else is
+# silently ignored.
 _ALLOWED_FIXED = [
+    "Routes.csv",
+    "Notes.csv",
+    "in.json",
+    "out.json",
+    "curation_notes.md",
+]
+
+# Required files that should normally be present for a valid cycle archive.
+# Their absence is recorded as a warning in the manifest. Optional allowlisted
+# files such as curation_notes.md are archived when present but do not warn
+# when absent.
+_EXPECTED_FIXED = [
     "Routes.csv",
     "Notes.csv",
     "in.json",
@@ -160,7 +173,7 @@ def _collect_files(cycle_dir: Path, cycle: AiracCycle) -> tuple[list[Path], list
 
     # Check for expected files and build warnings
     present_names = {p.name for p in all_files}
-    expected = _ALLOWED_FIXED + [_sct_basename(cycle)]
+    expected = _EXPECTED_FIXED + [_sct_basename(cycle)]
     warnings = [name for name in expected if name not in present_names]
 
     # Guard against archiving a wrong or empty directory

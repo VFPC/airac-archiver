@@ -68,8 +68,9 @@ The archiver copies only these cycle files into `airac-data`:
 | `UK_{YYYY}_{NN}.sct` | VATSIM UK sector file for the cycle |
 | `in.json` | Supplementary parser input |
 | `out.json` | Parser output, archived as `out.{ident}.{n}.json` |
+| `curation_notes.md` | Optional manual curation note for cycle-specific row removals or other interventions |
 
-Everything else in the working directory is ignored.
+Everything else in the working directory is ignored. `curation_notes.md` is optional: it is archived when present and ignored when absent.
 
 Expected files that are missing are recorded as warnings in `manifest.md`, but the archiver can still proceed as long as the directory looks like the correct cycle directory.
 

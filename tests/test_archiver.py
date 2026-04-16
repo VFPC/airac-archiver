@@ -44,6 +44,10 @@ _ALLOWED_FILES = [
     "UK_2026_02.sct",
 ]
 
+_OPTIONAL_ALLOWED_FILES = [
+    "curation_notes.md",
+]
+
 # Files that should be silently ignored (not on the allowlist).
 _NON_ALLOWED_FILES = [
     "EG-ENR-3.2-en-GB.html",
@@ -70,7 +74,7 @@ def _make_cycle_dir(tmp_path: Path, filenames: list[str]) -> Path:
 
 def _make_full_cycle_dir(tmp_path: Path) -> Path:
     """Create a realistic cycle directory with allowed and non-allowed files."""
-    return _make_cycle_dir(tmp_path, _ALLOWED_FILES + _NON_ALLOWED_FILES)
+    return _make_cycle_dir(tmp_path, _ALLOWED_FILES + _OPTIONAL_ALLOWED_FILES + _NON_ALLOWED_FILES)
 
 
 # ---------------------------------------------------------------------------
@@ -242,7 +246,7 @@ class TestCollectFiles:
         cycle_dir = _make_full_cycle_dir(tmp_path)
         files, _ = _collect_files(cycle_dir, CYCLE_2602)
         names = {p.name for p in files}
-        assert names == set(_ALLOWED_FILES)
+        assert names == set(_ALLOWED_FILES + _OPTIONAL_ALLOWED_FILES)
 
     def test_ignores_non_allowlisted_files(self, tmp_path):
         cycle_dir = _make_full_cycle_dir(tmp_path)
@@ -254,6 +258,13 @@ class TestCollectFiles:
     def test_no_warnings_when_all_expected_present(self, tmp_path):
         cycle_dir = _make_cycle_dir(tmp_path, _ALLOWED_FILES)
         _, warnings = _collect_files(cycle_dir, CYCLE_2602)
+        assert warnings == []
+
+    def test_optional_curation_note_does_not_trigger_warning(self, tmp_path):
+        cycle_dir = _make_cycle_dir(tmp_path, _ALLOWED_FILES + _OPTIONAL_ALLOWED_FILES)
+        files, warnings = _collect_files(cycle_dir, CYCLE_2602)
+        names = {p.name for p in files}
+        assert "curation_notes.md" in names
         assert warnings == []
 
     def test_warns_on_missing_sct(self, tmp_path):
@@ -498,6 +509,11 @@ class TestArchiveCycle:
                 assert "out.2602.1.json" in names, "out.json must be versioned as out.2602.1.json"
             else:
                 assert name in names
+
+    def test_optional_curation_note_copied_when_present(self, tmp_path):
+        copied, _ = self._run(tmp_path, filenames=_ALLOWED_FILES + _OPTIONAL_ALLOWED_FILES)
+        names = {p.name for p in copied}
+        assert "curation_notes.md" in names
 
     def test_non_allowed_files_not_copied(self, tmp_path):
         cycle_dir = _make_full_cycle_dir(tmp_path)
