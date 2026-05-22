@@ -33,9 +33,13 @@ directory are silently ignored:
 - in.json             — SRD Parser config input
 - out.json            — SRD Parser output (archived as out.YYNN.n.json)
 - curation_notes.md   — optional cycle-specific manual curation note
+- aip_*.json / enr44_points.json — optional AIP rebuild artifacts
+- runtime_rules.json and bundle fact/index files — optional RAD runtime artifacts
+- manifest.json      — optional runtime bundle manifest, archived as
+                       runtime_bundle_manifest.json
 
-Only the required files are logged as warnings when absent; the curation note
-is archived when present and ignored when absent.
+Only the required files are logged as warnings when absent; optional files are
+archived when present and ignored when absent.
 
 Concurrency
 -----------
@@ -74,7 +78,24 @@ _ALLOWED_FIXED = [
     "in.json",
     "out.json",
     "curation_notes.md",
+    "aip_airports.json",
+    "aip_airspaces.json",
+    "aip_navaids.json",
+    "aip_restricted_areas.json",
+    "aip_segments.json",
+    "enr44_points.json",
+    "runtime_rules.json",
+    "selection_indexes.json",
+    "route_network_facts.json",
+    "airspace_facts.json",
+    "procedure_facts.json",
+    "restricted_area_facts.json",
+    "manifest.json",
 ]
+
+_ARCHIVE_RENAMES = {
+    "manifest.json": "runtime_bundle_manifest.json",
+}
 
 # Required files that should normally be present for a valid cycle archive.
 # Their absence is recorded as a warning in the manifest. Optional allowlisted
@@ -93,6 +114,25 @@ _MIN_EXPECTED_PRESENT = 3
 
 # Versioned out.json: out.{ident}.{n}.json — e.g. out.2603.1.json
 _OUT_VERSION_RE = re.compile(r"^out\.(\d{4})\.(\d+)\.json$")
+_ARCHIVE_DIR_RE = re.compile(r"^vFPC (\d{4})$")
+_SCT_RE = re.compile(r"^UK_\d{4}_\d{2}\.sct$")
+
+_SLIM_DROP_FIXED = {
+    "Routes.csv",
+    "Notes.csv",
+    "aip_airports.json",
+    "aip_airspaces.json",
+    "aip_navaids.json",
+    "aip_restricted_areas.json",
+    "aip_segments.json",
+    "enr44_points.json",
+    "runtime_rules.json",
+    "selection_indexes.json",
+    "route_network_facts.json",
+    "airspace_facts.json",
+    "procedure_facts.json",
+    "restricted_area_facts.json",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -247,7 +287,7 @@ def _copy_files(files: list[Path], dest_dir: Path) -> list[Path]:
     dest_dir.mkdir(parents=True, exist_ok=True)
     copied = []
     for src in files:
-        dst = dest_dir / src.name
+        dst = dest_dir / _ARCHIVE_RENAMES.get(src.name, src.name)
         shutil.copy2(src, dst)
         copied.append(dst)
     return copied
@@ -265,6 +305,41 @@ def _git_stage(archive_repo: Path, *paths: Path) -> None:
         raise ArchiverError(
             f"git add failed in {archive_repo}:\n{result.stderr.strip()}"
         )
+
+
+def _archive_cycle_dirs_before(archive_repo: Path, before_ident: str) -> list[Path]:
+    """Return archived cycle directories whose YYNN ident is earlier than *before_ident*."""
+    dirs: list[Path] = []
+    if not archive_repo.is_dir():
+        raise ArchiverError(f"Archive repo does not exist: {archive_repo}")
+    for path in archive_repo.iterdir():
+        if not path.is_dir():
+            continue
+        match = _ARCHIVE_DIR_RE.match(path.name)
+        if match and match.group(1) < before_ident:
+            dirs.append(path)
+    return sorted(dirs, key=lambda p: p.name)
+
+
+def _is_slim_drop_file(path: Path) -> bool:
+    """Return True when *path* is removed by the archive slim policy."""
+    return path.name in _SLIM_DROP_FIXED or bool(_SCT_RE.match(path.name))
+
+
+def slim_candidates(archive_repo: Path, before_ident: str) -> list[Path]:
+    """Return files that would be removed by the retention slim policy.
+
+    The slim policy preserves ``out.YYNN.N.json``, ``manifest.md``,
+    ``curation_notes.md``, and ``in.json``. It removes large source/rebuild
+    artifacts from archived cycles older than *before_ident*.
+    """
+    candidates: list[Path] = []
+    for cycle_dir in _archive_cycle_dirs_before(archive_repo, before_ident):
+        candidates.extend(
+            path for path in sorted(cycle_dir.iterdir(), key=lambda p: p.name)
+            if path.is_file() and _is_slim_drop_file(path)
+        )
+    return candidates
 
 
 # ---------------------------------------------------------------------------

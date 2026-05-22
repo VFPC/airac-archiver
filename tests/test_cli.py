@@ -193,6 +193,48 @@ class TestArchiveCommand:
 
 
 # ---------------------------------------------------------------------------
+# slim command
+# ---------------------------------------------------------------------------
+
+class TestSlimCommand:
+    def test_report_exits_zero(self, tmp_path):
+        cfg = _make_config(tmp_path)
+        runner = CliRunner()
+        with (
+            patch("src.cli.load", return_value=cfg),
+            patch("src.cli.slim_candidates", return_value=[cfg.archive_repo / "vFPC 2601" / "Routes.csv"]),
+        ):
+            result = runner.invoke(cli, ["slim", "--before", "2602"])
+        assert result.exit_code == 0
+
+    def test_report_mentions_no_files_removed(self, tmp_path):
+        cfg = _make_config(tmp_path)
+        runner = CliRunner()
+        with (
+            patch("src.cli.load", return_value=cfg),
+            patch("src.cli.slim_candidates", return_value=[cfg.archive_repo / "vFPC 2601" / "Routes.csv"]),
+        ):
+            result = runner.invoke(cli, ["slim", "--before", "2602"])
+        assert "report only" in result.output
+        assert "No files were removed" in result.output
+
+    def test_rejects_apply_option(self, tmp_path):
+        cfg = _make_config(tmp_path)
+        runner = CliRunner()
+        with patch("src.cli.load", return_value=cfg):
+            result = runner.invoke(cli, ["slim", "--before", "2602", "--apply"])
+        assert result.exit_code != 0
+        assert "No such option" in result.output
+
+    def test_invalid_before_exits_nonzero(self, tmp_path):
+        cfg = _make_config(tmp_path)
+        runner = CliRunner()
+        with patch("src.cli.load", return_value=cfg):
+            result = runner.invoke(cli, ["slim", "--before", "26A2"])
+        assert result.exit_code != 0
+
+
+# ---------------------------------------------------------------------------
 # Help
 # ---------------------------------------------------------------------------
 
@@ -205,3 +247,6 @@ class TestHelp:
 
     def test_archive_in_help_output(self):
         assert "archive" in CliRunner().invoke(cli, ["--help"]).output
+
+    def test_slim_in_help_output(self):
+        assert "slim" in CliRunner().invoke(cli, ["--help"]).output

@@ -30,7 +30,7 @@ from pathlib import Path
 import click
 
 from src.airac import AiracCycle, current_cycle, cycle_for_date
-from src.archiver import ArchiverError, _collect_files, archive_cycle
+from src.archiver import ArchiverError, _collect_files, archive_cycle, slim_candidates
 from src.config import ConfigError, load
 
 _IDENT_RE = re.compile(r"^\d{4}$")
@@ -134,6 +134,48 @@ def archive(cycle: str | None) -> None:
     click.echo(f"\n  {len(copied)} file(s) + manifest staged in:")
     click.echo(f"  {manifest_path.parent}")
     click.echo("\nReview and commit when ready.")
+
+
+@cli.command()
+@click.option(
+    "--before",
+    "before_cycle",
+    required=True,
+    metavar="YYNN",
+    help="Slim archived cycles earlier than this AIRAC ident, e.g. 2603.",
+)
+def slim(before_cycle: str) -> None:
+    """Report files that match the draft airac-data retention slim policy."""
+    if not _IDENT_RE.match(before_cycle):
+        _abort(f"'{before_cycle}' is not a valid cycle ident — expected 4 digits, e.g. '2603'.")
+
+    try:
+        cfg = load()
+    except ConfigError as exc:
+        _abort(str(exc))
+
+    click.echo(f"\nArchive repo: {cfg.archive_repo}")
+    click.echo(f"Slim cycles before: {before_cycle}")
+    click.echo("Mode: report only; no files are removed\n")
+
+    try:
+        candidates = slim_candidates(cfg.archive_repo, before_cycle)
+    except ArchiverError as exc:
+        _abort(str(exc))
+
+    if not candidates:
+        click.echo("No files match the slim policy.")
+        return
+
+    for path in candidates:
+        try:
+            display = path.relative_to(cfg.archive_repo)
+        except ValueError:
+            display = path
+        click.echo(f"  {display}")
+
+    click.echo(f"\nReport only: {len(candidates)} file(s) match the draft slim policy.")
+    click.echo("No files were removed. Implement destructive slimming only after the keep/drop policy is finalized.")
 
 
 if __name__ == "__main__":

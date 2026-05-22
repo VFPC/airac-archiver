@@ -26,6 +26,7 @@ from src.archiver import (
     _sha256,
     _sct_basename,
     archive_cycle,
+    slim_candidates,
 )
 
 # ---------------------------------------------------------------------------
@@ -46,13 +47,25 @@ _ALLOWED_FILES = [
 
 _OPTIONAL_ALLOWED_FILES = [
     "curation_notes.md",
+    "aip_airports.json",
+    "aip_airspaces.json",
+    "aip_navaids.json",
+    "aip_restricted_areas.json",
+    "aip_segments.json",
+    "enr44_points.json",
+    "runtime_rules.json",
+    "selection_indexes.json",
+    "route_network_facts.json",
+    "airspace_facts.json",
+    "procedure_facts.json",
+    "restricted_area_facts.json",
+    "manifest.json",
 ]
 
 # Files that should be silently ignored (not on the allowlist).
 _NON_ALLOWED_FILES = [
     "EG-ENR-3.2-en-GB.html",
     "EG-ENR-3.3-en-GB.html",
-    "aip_segments.json",
     "UK and Ireland SRD_March_2026.xlsx",
     "output_20260219_090000.json",
     "audit_decisions.md",
@@ -224,9 +237,21 @@ class TestIsAllowed:
         allowed = set(_ALLOWED_FIXED) | {"UK_2026_02.sct"}
         assert not _is_allowed(Path("EG-ENR-3.2-en-GB.html"), allowed)
 
-    def test_aip_segments_not_allowed(self):
+    def test_aip_segments_allowed(self):
         allowed = set(_ALLOWED_FIXED) | {"UK_2026_02.sct"}
-        assert not _is_allowed(Path("aip_segments.json"), allowed)
+        assert _is_allowed(Path("aip_segments.json"), allowed)
+
+    def test_runtime_rules_allowed(self):
+        allowed = set(_ALLOWED_FIXED) | {"UK_2026_02.sct"}
+        assert _is_allowed(Path("runtime_rules.json"), allowed)
+
+    def test_enr44_points_allowed(self):
+        allowed = set(_ALLOWED_FIXED) | {"UK_2026_02.sct"}
+        assert _is_allowed(Path("enr44_points.json"), allowed)
+
+    def test_runtime_bundle_manifest_allowed(self):
+        allowed = set(_ALLOWED_FIXED) | {"UK_2026_02.sct"}
+        assert _is_allowed(Path("manifest.json"), allowed)
 
     def test_log_file_not_allowed(self):
         allowed = set(_ALLOWED_FIXED) | {"UK_2026_02.sct"}
@@ -265,6 +290,18 @@ class TestCollectFiles:
         files, warnings = _collect_files(cycle_dir, CYCLE_2602)
         names = {p.name for p in files}
         assert "curation_notes.md" in names
+        assert warnings == []
+
+    def test_optional_rebuild_artifacts_do_not_trigger_warnings(self, tmp_path):
+        rebuild_artifacts = [
+            name for name in _OPTIONAL_ALLOWED_FILES
+            if name != "curation_notes.md"
+        ]
+        cycle_dir = _make_cycle_dir(tmp_path, _ALLOWED_FILES + rebuild_artifacts)
+        files, warnings = _collect_files(cycle_dir, CYCLE_2602)
+        names = {p.name for p in files}
+        for name in rebuild_artifacts:
+            assert name in names
         assert warnings == []
 
     def test_warns_on_missing_sct(self, tmp_path):
@@ -306,6 +343,62 @@ class TestCollectFiles:
         files, warnings = _collect_files(cycle_dir, CYCLE_2602)
         assert len(files) == 3
         assert len(warnings) > 0
+
+
+# ---------------------------------------------------------------------------
+# slim retention policy
+# ---------------------------------------------------------------------------
+
+class TestSlimPolicy:
+    def _make_archive_repo(self, tmp_path: Path) -> Path:
+        repo = tmp_path / "airac-data"
+        old_dir = repo / "vFPC 2601"
+        current_dir = repo / "vFPC 2602"
+        old_dir.mkdir(parents=True)
+        current_dir.mkdir(parents=True)
+
+        for directory in (old_dir, current_dir):
+            for name in [
+                "out.2601.1.json" if directory is old_dir else "out.2602.1.json",
+                "manifest.md",
+                "curation_notes.md",
+                "in.json",
+                "Routes.csv",
+                "Notes.csv",
+                "UK_2026_01.sct" if directory is old_dir else "UK_2026_02.sct",
+                "aip_segments.json",
+                "runtime_rules.json",
+            ]:
+                (directory / name).write_text(f"content of {name}", encoding="utf-8")
+        return repo
+
+    def test_slim_candidates_only_older_cycles(self, tmp_path):
+        repo = self._make_archive_repo(tmp_path)
+
+        names = {p.relative_to(repo).as_posix() for p in slim_candidates(repo, "2602")}
+
+        assert "vFPC 2601/Routes.csv" in names
+        assert "vFPC 2601/aip_segments.json" in names
+        assert "vFPC 2602/Routes.csv" not in names
+
+    def test_slim_candidates_preserve_primary_artifacts(self, tmp_path):
+        repo = self._make_archive_repo(tmp_path)
+
+        names = {p.name for p in slim_candidates(repo, "2602")}
+
+        assert "out.2601.1.json" not in names
+        assert "manifest.md" not in names
+        assert "curation_notes.md" not in names
+        assert "in.json" not in names
+
+    def test_slim_candidates_is_report_only(self, tmp_path):
+        repo = self._make_archive_repo(tmp_path)
+
+        candidates = slim_candidates(repo, "2602")
+
+        assert candidates
+        for path in candidates:
+            assert path.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -425,6 +518,15 @@ class TestCopyFiles:
         _copy_files([src], dest_dir)
         assert (dest_dir / "data.json").read_bytes() == b'{"key": "value"}'
 
+    def test_renames_runtime_bundle_manifest(self, tmp_path):
+        src = tmp_path / "manifest.json"
+        src.write_text('{"bundle": true}', encoding="utf-8")
+        dest_dir = tmp_path / "dest"
+        copied = _copy_files([src], dest_dir)
+        assert copied == [dest_dir / "runtime_bundle_manifest.json"]
+        assert not (dest_dir / "manifest.json").exists()
+        assert (dest_dir / "runtime_bundle_manifest.json").read_text(encoding="utf-8") == '{"bundle": true}'
+
 
 # ---------------------------------------------------------------------------
 # _git_stage
@@ -509,6 +611,17 @@ class TestArchiveCycle:
                 assert "out.2602.1.json" in names, "out.json must be versioned as out.2602.1.json"
             else:
                 assert name in names
+
+    def test_runtime_bundle_manifest_renamed_in_archive(self, tmp_path):
+        copied, manifest_path = self._run(tmp_path, filenames=_ALLOWED_FILES + ["manifest.json"])
+        subdir = manifest_path.parent
+        names = {p.name for p in copied}
+        assert "runtime_bundle_manifest.json" in names
+        assert (subdir / "runtime_bundle_manifest.json").exists()
+        assert not (subdir / "manifest.json").exists()
+        manifest_text = manifest_path.read_text(encoding="utf-8")
+        assert "`runtime_bundle_manifest.json`" in manifest_text
+        assert "`manifest.json`" not in manifest_text
 
     def test_optional_curation_note_copied_when_present(self, tmp_path):
         copied, _ = self._run(tmp_path, filenames=_ALLOWED_FILES + _OPTIONAL_ALLOWED_FILES)

@@ -69,8 +69,21 @@ The archiver copies only these cycle files into `airac-data`:
 | `in.json` | Supplementary parser input |
 | `out.json` | Parser output, archived as `out.{ident}.{n}.json` |
 | `curation_notes.md` | Optional manual curation note for cycle-specific row removals or other interventions |
+| `aip_airports.json` | Optional AIP airport artifact used by rebuild/evaluation tooling |
+| `aip_airspaces.json` | Optional generated AIP controlled-airspace artifact |
+| `aip_navaids.json` | Optional AIP navaid artifact |
+| `aip_restricted_areas.json` | Optional AIP restricted-area artifact |
+| `aip_segments.json` | Optional AIP route-segment artifact |
+| `enr44_points.json` | Optional ENR 4.4 point artifact used for fix reconstruction |
+| `runtime_rules.json` | Optional compiled RAD runtime rules |
+| `selection_indexes.json` | Optional compiled RAD selection indexes |
+| `route_network_facts.json` | Optional route-network fact artifact |
+| `airspace_facts.json` | Optional airspace fact artifact |
+| `procedure_facts.json` | Optional procedure fact artifact |
+| `restricted_area_facts.json` | Optional restricted-area fact artifact |
+| `manifest.json` | Optional runtime bundle manifest, archived as `runtime_bundle_manifest.json` |
 
-Everything else in the working directory is ignored. `curation_notes.md` is optional: it is archived when present and ignored when absent.
+Everything else in the working directory is ignored. Optional files are archived when present and ignored when absent.
 
 Expected files that are missing are recorded as warnings in `manifest.md`, but the archiver can still proceed as long as the directory looks like the correct cycle directory.
 
@@ -100,8 +113,9 @@ The `--cycle` argument is a four-digit AIRAC ident: two-digit year followed by t
 2. Collects only the allowlisted files for that cycle.
 3. Copies them as flat files into `{archive_repo}\vFPC YYNN\`.
 4. Renames `out.json` to `out.{ident}.{n}.json`.
-5. Writes `manifest.md` with cycle metadata, warnings, and SHA256 checksums.
-6. Runs `git add` in the `airac-data` repo so the archive is staged for review.
+5. Renames the runtime bundle `manifest.json` to `runtime_bundle_manifest.json` when present.
+6. Writes `manifest.md` with cycle metadata, warnings, and SHA256 checksums.
+7. Runs `git add` in the `airac-data` repo so the archive is staged for review.
 
 After the tool completes, review the staged changes in the `airac-data` repository and commit when satisfied:
 
@@ -131,6 +145,20 @@ When the same cycle is archived again:
 - existing `out.2603.N.json` files are preserved
 - the new `out.json` becomes the next numbered version
 - the manifest lists every archived version currently present for that cycle
+
+---
+
+## Retention and slimming
+
+The archive is intended to support rollback and recreation of recent publications. Recent cycles should therefore keep the full artifact set, including source CSVs, AIP extracts, RAD runtime artifacts, the sector file, `in.json`, `out.*.json`, `manifest.md`, and any curation notes.
+
+Older cycles may later be slimmed to reduce repository size. The current `slim` command is deliberately report-only because the exact age threshold and slim artifact set are still policy decisions.
+
+```
+python -m src slim --before 2603
+```
+
+The command reports older-cycle files that match the draft slim policy. It does not remove files, does not stage deletions, and has no `--apply` mode.
 
 ---
 
