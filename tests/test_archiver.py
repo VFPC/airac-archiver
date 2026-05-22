@@ -379,6 +379,7 @@ class TestSlimPolicy:
 
         assert "vFPC 2601/Routes.csv" in names
         assert "vFPC 2601/aip_segments.json" in names
+        assert "vFPC 2601/UK_2026_01.sct" in names
         assert "vFPC 2602/Routes.csv" not in names
 
     def test_slim_candidates_preserve_primary_artifacts(self, tmp_path):

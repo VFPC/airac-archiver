@@ -133,6 +133,8 @@ _SLIM_DROP_FIXED = {
     "procedure_facts.json",
     "restricted_area_facts.json",
 }
+# runtime_bundle_manifest.json is intentionally preserved as provenance for
+# archived runtime bundles, even though the source manifest.json is allowlisted.
 
 
 # ---------------------------------------------------------------------------
