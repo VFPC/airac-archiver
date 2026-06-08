@@ -2,7 +2,7 @@
 
 Copies prepared AIRAC cycle files into the [airac-data](https://github.com/VFPC/airac-data) archive repo as flat files and stages them for review before commit.
 
-This tool does **not** build zip archives. It copies an allowlisted set of files into `airac-data`, writes `manifest.md`, renames `out.json` to a versioned archive filename, and runs `git add`.
+This tool does **not** build zip archives. It copies an allowlisted set of files into `airac-data`, writes `manifest.md`, renames `out.json` using the parser output `cycle` field, and runs `git add`.
 
 Run this tool after `New-SRDParser` has produced `out.json` in the cycle working directory.
 
@@ -67,8 +67,10 @@ The archiver copies only these cycle files into `airac-data`:
 | `Notes.csv` | SRD notes data |
 | `UK_{YYYY}_{NN}.sct` | VATSIM UK sector file for the cycle |
 | `in.json` | Supplementary parser input |
-| `out.json` | Parser output, archived as `out.{ident}.{n}.json` |
+| `out.json` | Parser output, archived as `out.{cycle}.json` using the embedded parser `cycle` value |
 | `curation_notes.md` | Optional manual curation note for cycle-specific row removals or other interventions |
+| `Routes.*curation*.json`, `Routes.*edits*.json`, `Routes.*curation*.md` | Optional route curation audit files used to reconstruct SRD route patches |
+| `vfp*_curation*.json`, `vfp*_curation*.md` | Optional issue-specific route curation audit files |
 | `aip_airports.json` | Optional AIP airport artifact used by rebuild/evaluation tooling |
 | `aip_airspaces.json` | Optional generated AIP controlled-airspace artifact |
 | `aip_navaids.json` | Optional AIP navaid artifact |
@@ -112,7 +114,7 @@ The `--cycle` argument is a four-digit AIRAC ident: two-digit year followed by t
 1. Validates that the target cycle directory exists.
 2. Collects only the allowlisted files for that cycle.
 3. Copies them as flat files into `{archive_repo}\vFPC YYNN\`.
-4. Renames `out.json` to `out.{ident}.{n}.json`.
+4. Renames `out.json` to `out.{cycle}.json` using the `cycle` value inside `out.json`.
 5. Renames the runtime bundle `manifest.json` to `runtime_bundle_manifest.json` when present.
 6. Writes `manifest.md` with cycle metadata, warnings, and SHA256 checksums.
 7. Runs `git add` in the `airac-data` repo so the archive is staged for review.
@@ -130,20 +132,20 @@ git push
 
 ## Dot releases for out.json
 
-The archive keeps multiple versions of `out.json` for the **same cycle** when that cycle is re-archived.
+The archive keeps multiple published parser outputs for the **same AIRAC cycle** when dot releases are moved to production.
 
 Examples:
 
-- `out.2603.1.json` = first archived parser output for AIRAC 2603
-- `out.2603.2.json` = later re-archive of AIRAC 2603 after a parser rerun or correction
-- `out.2603.3.json` = another later archive of the same cycle
+- `out.2605.6.json` = parser output whose embedded `cycle` is `2605.6`
+- `out.2605.9.json` = later published parser output whose embedded `cycle` is `2605.9`
 
-These are not separate AIRAC cycles and not semantic-version releases. They are archive revisions of the same cycle output.
+These are not separate AIRAC cycles. They are parser dot releases for the same cycle, and the archive can jump from one dot release to a later one because not every parser run is promoted to production.
 
 When the same cycle is archived again:
 
-- existing `out.2603.N.json` files are preserved
-- the new `out.json` becomes the next numbered version
+- existing `out.YYNN.N.json` files are preserved
+- the new `out.json` becomes `out.<embedded-cycle>.json`
+- archiving fails if that filename already exists with different content
 - the manifest lists every archived version currently present for that cycle
 
 ---

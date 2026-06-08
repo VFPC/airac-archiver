@@ -22,6 +22,7 @@ from src.archiver import (
     _git_stage,
     _is_allowed,
     _next_out_version,
+    _out_cycle_value,
     _out_version_name,
     _sha256,
     _sct_basename,
@@ -60,6 +61,10 @@ _OPTIONAL_ALLOWED_FILES = [
     "procedure_facts.json",
     "restricted_area_facts.json",
     "manifest.json",
+    "Routes.city_pair_cap_edits.20260522-082432.json",
+    "Routes.confirmed_rad_denial_curation.20260608-071406.json",
+    "Routes.vfp60_eg2444_curation.20260529-163336.md",
+    "vfp60_eg2444_route_curation.json",
 ]
 
 # Files that should be silently ignored (not on the allowlist).
@@ -72,6 +77,8 @@ _NON_ALLOWED_FILES = [
     "What's changed.csv",
     "log_20260219_0900.txt",
     "discord_announcement.md",
+    "Routes.csv.pre-2605.9-confirmed-rad-denial-curation.20260608-071406.bak",
+    "out.json.pre-2605.9-confirmed-rad-denial-curation.20260608-071645.bak",
 ]
 
 
@@ -81,7 +88,10 @@ def _make_cycle_dir(tmp_path: Path, filenames: list[str]) -> Path:
     cycle_dir.mkdir()
     for name in filenames:
         p = cycle_dir / name
-        p.write_text(f"content of {name}", encoding="utf-8")
+        if name == "out.json":
+            p.write_text('{"cycle": "2602.1", "airports": [], "constraints": []}', encoding="utf-8")
+        else:
+            p.write_text(f"content of {name}", encoding="utf-8")
     return cycle_dir
 
 
@@ -126,13 +136,20 @@ class TestSctBasename:
 
 class TestOutVersionName:
     def test_format(self):
-        assert _out_version_name(CYCLE_2602, 1) == "out.2602.1.json"
+        assert _out_version_name("2602.1") == "out.2602.1.json"
 
     def test_double_digit_version(self):
-        assert _out_version_name(CYCLE_2602, 12) == "out.2602.12.json"
+        assert _out_version_name("2602.12") == "out.2602.12.json"
 
     def test_different_cycle(self):
-        assert _out_version_name(CYCLE_2601, 3) == "out.2601.3.json"
+        assert _out_version_name("2601.3") == "out.2601.3.json"
+
+    def test_base_cycle(self):
+        assert _out_version_name("2602") == "out.2602.json"
+
+    def test_rejects_invalid_cycle_value(self):
+        with pytest.raises(ArchiverError, match="Invalid out.json cycle value"):
+            _out_version_name("2602-beta")
 
 
 class TestOutVersionRE:
@@ -144,6 +161,11 @@ class TestOutVersionRE:
         assert m.group(1) == "2603"
         assert m.group(2) == "5"
 
+    def test_matches_base_cycle_name(self):
+        m = _OUT_VERSION_RE.match("out.2603.json")
+        assert m.group(1) == "2603"
+        assert m.group(2) is None
+
     def test_rejects_plain_out_json(self):
         assert not _OUT_VERSION_RE.match("out.json")
 
@@ -152,6 +174,37 @@ class TestOutVersionRE:
 
     def test_rejects_wrong_prefix(self):
         assert not _OUT_VERSION_RE.match("data.2602.1.json")
+
+
+class TestOutCycleValue:
+    def test_reads_cycle_from_parser_output(self, tmp_path):
+        path = tmp_path / "out.json"
+        path.write_text('{"cycle": "2602.9"}', encoding="utf-8")
+        assert _out_cycle_value(path, CYCLE_2602) == "2602.9"
+
+    def test_rejects_missing_cycle(self, tmp_path):
+        path = tmp_path / "out.json"
+        path.write_text("{}", encoding="utf-8")
+        with pytest.raises(ArchiverError, match="missing string cycle"):
+            _out_cycle_value(path, CYCLE_2602)
+
+    def test_rejects_non_string_cycle(self, tmp_path):
+        path = tmp_path / "out.json"
+        path.write_text('{"cycle": 2602}', encoding="utf-8")
+        with pytest.raises(ArchiverError, match="missing string cycle"):
+            _out_cycle_value(path, CYCLE_2602)
+
+    def test_rejects_invalid_json(self, tmp_path):
+        path = tmp_path / "out.json"
+        path.write_text("not json at all", encoding="utf-8")
+        with pytest.raises(ArchiverError, match="not valid JSON"):
+            _out_cycle_value(path, CYCLE_2602)
+
+    def test_rejects_mismatched_cycle(self, tmp_path):
+        path = tmp_path / "out.json"
+        path.write_text('{"cycle": "2601.9"}', encoding="utf-8")
+        with pytest.raises(ArchiverError, match="does not match archive cycle"):
+            _out_cycle_value(path, CYCLE_2602)
 
 
 class TestExistingOutVersions:
@@ -260,6 +313,25 @@ class TestIsAllowed:
     def test_audit_md_not_allowed(self):
         allowed = set(_ALLOWED_FIXED) | {"UK_2026_02.sct"}
         assert not _is_allowed(Path("audit_decisions.md"), allowed)
+
+    def test_route_curation_json_allowed(self):
+        allowed = set(_ALLOWED_FIXED) | {"UK_2026_02.sct"}
+        assert _is_allowed(Path("Routes.confirmed_rad_denial_curation.20260608-071406.json"), allowed)
+
+    def test_route_edit_json_allowed(self):
+        allowed = set(_ALLOWED_FIXED) | {"UK_2026_02.sct"}
+        assert _is_allowed(Path("Routes.city_pair_cap_edits.20260522-082432.json"), allowed)
+
+    def test_vfp_curation_json_allowed(self):
+        allowed = set(_ALLOWED_FIXED) | {"UK_2026_02.sct"}
+        assert _is_allowed(Path("vfp60_eg2444_route_curation.json"), allowed)
+
+    def test_route_backup_not_allowed(self):
+        allowed = set(_ALLOWED_FIXED) | {"UK_2026_02.sct"}
+        assert not _is_allowed(
+            Path("Routes.csv.pre-2605.9-confirmed-rad-denial-curation.20260608-071406.bak"),
+            allowed,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -674,8 +746,8 @@ class TestArchiveCycle:
         assert not (subdir / "out.json").exists(), "bare out.json must not remain"
         assert (subdir / "out.2602.1.json").exists()
 
-    def test_out_version_increments_on_rearchive(self, tmp_path):
-        """Re-archiving must create out.{ident}.2.json and preserve version 1."""
+    def test_out_version_uses_parser_cycle_on_rearchive(self, tmp_path):
+        """Re-archiving uses the parser output cycle rather than local sequence."""
         cycle_dir = _make_cycle_dir(tmp_path, _ALLOWED_FILES)
         archive_repo = tmp_path / "airac-data"
         archive_repo.mkdir()
@@ -685,42 +757,74 @@ class TestArchiveCycle:
         subdir = archive_repo / "vFPC 2602"
         assert (subdir / "out.2602.1.json").exists()
 
-        (cycle_dir / "out.json").write_text("updated content", encoding="utf-8")
+        (cycle_dir / "out.json").write_text('{"cycle": "2602.7", "constraints": []}', encoding="utf-8")
         with patch("subprocess.run") as mock_run:
             mock_run.return_value.returncode = 0
             archive_cycle(CYCLE_2602, cycle_dir, archive_repo)
         assert (subdir / "out.2602.1.json").exists(), "version 1 must be preserved"
-        assert (subdir / "out.2602.2.json").exists(), "version 2 must be created"
-        assert (subdir / "out.2602.1.json").read_text() == "content of out.json"
-        assert (subdir / "out.2602.2.json").read_text() == "updated content"
+        assert (subdir / "out.2602.7.json").exists(), "parser release 7 must be created"
 
-    def test_out_version_preserved_contents_across_three_runs(self, tmp_path):
-        """Three archive runs should produce out.2602.{1,2,3}.json with correct contents."""
+    def test_out_version_preserved_contents_across_three_parser_releases(self, tmp_path):
+        """Archive runs should preserve each parser release named by out.json."""
         cycle_dir = _make_cycle_dir(tmp_path, _ALLOWED_FILES)
         archive_repo = tmp_path / "airac-data"
         archive_repo.mkdir()
         subdir = archive_repo / "vFPC 2602"
 
-        for i in range(1, 4):
-            (cycle_dir / "out.json").write_text(f"version {i}", encoding="utf-8")
+        for i in (1, 4, 9):
+            (cycle_dir / "out.json").write_text(f'{{"cycle": "2602.{i}", "release": {i}}}', encoding="utf-8")
             with patch("subprocess.run") as mock_run:
                 mock_run.return_value.returncode = 0
                 archive_cycle(CYCLE_2602, cycle_dir, archive_repo)
 
-        for i in range(1, 4):
+        for i in (1, 4, 9):
             p = subdir / f"out.2602.{i}.json"
             assert p.exists(), f"version {i} must exist"
-            assert p.read_text() == f"version {i}"
+            assert f'"cycle": "2602.{i}"' in p.read_text()
 
-    def test_manifest_lists_all_out_versions(self, tmp_path):
-        """Manifest after re-archive must list both out versions."""
+    def test_rearchive_same_parser_release_with_different_content_raises(self, tmp_path):
+        """A parser release filename cannot be overwritten with different content."""
         cycle_dir = _make_cycle_dir(tmp_path, _ALLOWED_FILES)
         archive_repo = tmp_path / "airac-data"
         archive_repo.mkdir()
         with patch("subprocess.run") as mock_run:
             mock_run.return_value.returncode = 0
             archive_cycle(CYCLE_2602, cycle_dir, archive_repo)
-        (cycle_dir / "out.json").write_text("v2", encoding="utf-8")
+
+        (cycle_dir / "out.json").write_text('{"cycle": "2602.1", "changed": true}', encoding="utf-8")
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value.returncode = 0
+            with pytest.raises(ArchiverError, match="already exists with different content"):
+                archive_cycle(CYCLE_2602, cycle_dir, archive_repo)
+
+    def test_rearchive_same_parser_release_with_same_content_succeeds(self, tmp_path):
+        """Re-running the same parser release with identical content is idempotent."""
+        cycle_dir = _make_cycle_dir(tmp_path, _ALLOWED_FILES)
+        archive_repo = tmp_path / "airac-data"
+        archive_repo.mkdir()
+        subdir = archive_repo / "vFPC 2602"
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value.returncode = 0
+            archive_cycle(CYCLE_2602, cycle_dir, archive_repo)
+
+        first_content = (subdir / "out.2602.1.json").read_text(encoding="utf-8")
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value.returncode = 0
+            archive_cycle(CYCLE_2602, cycle_dir, archive_repo)
+
+        assert not (subdir / "out.json").exists()
+        assert (subdir / "out.2602.1.json").read_text(encoding="utf-8") == first_content
+
+    def test_manifest_lists_all_out_versions(self, tmp_path):
+        """Manifest after re-archive must list both parser release outputs."""
+        cycle_dir = _make_cycle_dir(tmp_path, _ALLOWED_FILES)
+        archive_repo = tmp_path / "airac-data"
+        archive_repo.mkdir()
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value.returncode = 0
+            archive_cycle(CYCLE_2602, cycle_dir, archive_repo)
+        (cycle_dir / "out.json").write_text('{"cycle": "2602.2"}', encoding="utf-8")
         with patch("subprocess.run") as mock_run:
             mock_run.return_value.returncode = 0
             _, manifest_path = archive_cycle(CYCLE_2602, cycle_dir, archive_repo)
