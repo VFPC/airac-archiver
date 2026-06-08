@@ -12,15 +12,15 @@ Workflow
 Archive layout in airac-data repo
 ----------------------------------
 ``{archive_repo}/vFPC YYNN/<filename>``             — one flat file per collected file
-``{archive_repo}/vFPC YYNN/out.YYNN.{n}.json``      — versioned parser output
+``{archive_repo}/vFPC YYNN/out.<cycle>.json``       - parser output named from out.json
 ``{archive_repo}/vFPC YYNN/manifest.md``             — cycle metadata + checksums
 
 Versioned out.json
 -------------------
 The parser writes ``out.json`` into the working directory.  During archival
-this file is renamed to ``out.{ident}.{n}.json`` (e.g. ``out.2603.1.json``).
-Re-archiving the same cycle increments *n*, and all previous versions are
-preserved.  The manifest lists every version.
+this file is renamed from its embedded ``cycle`` value (e.g. ``2605.9`` becomes
+``out.2605.9.json``). Not every parser dot release is moved to production, so
+archive filenames follow the parser output instead of local archive sequence.
 
 Allowlisted files
 ------------------
@@ -31,8 +31,10 @@ directory are silently ignored:
 - Notes.csv           — SRD notes data (hard to re-obtain)
 - UK_{YYYY}_{NN}.sct  — VATSIM UK sector file (hard to re-obtain)
 - in.json             — SRD Parser config input
-- out.json            — SRD Parser output (archived as out.YYNN.n.json)
-- curation_notes.md   — optional cycle-specific manual curation note
+- out.json            - SRD Parser output (archived as out.<cycle>.json)
+- curation_notes.md   - optional cycle-specific manual curation note
+- Routes.*curation/edits*.json|md and vfp*_curation*.json|md
+                       - optional route patch reconstruction evidence
 - aip_*.json / enr44_points.json — optional AIP rebuild artifacts
 - runtime_rules.json and bundle fact/index files — optional RAD runtime artifacts
 - manifest.json      — optional runtime bundle manifest, archived as
@@ -54,6 +56,7 @@ from __future__ import annotations
 
 import getpass
 import hashlib
+import json
 import re
 import shutil
 import subprocess
@@ -112,10 +115,15 @@ _EXPECTED_FIXED = [
 # Fewer than this indicates a missing or wrong cycle directory, not just an incomplete cycle.
 _MIN_EXPECTED_PRESENT = 3
 
-# Versioned out.json: out.{ident}.{n}.json — e.g. out.2603.1.json
-_OUT_VERSION_RE = re.compile(r"^out\.(\d{4})\.(\d+)\.json$")
+# Versioned out.json: out.{cycle}.json — e.g. out.2605.9.json
+_OUT_VERSION_RE = re.compile(r"^out\.(\d{4})(?:\.(\d+))?\.json$")
+_OUT_CYCLE_RE = re.compile(r"^\d{4}(?:\.\d+)?$")
 _ARCHIVE_DIR_RE = re.compile(r"^vFPC (\d{4})$")
 _SCT_RE = re.compile(r"^UK_\d{4}_\d{2}\.sct$")
+_CURATION_AUDIT_RE = re.compile(
+    r"^(?:Routes\..*(?:curation|edits).*|vfp\d+_.*curation.*)\.(?:json|md)$",
+    re.IGNORECASE,
+)
 
 _SLIM_DROP_FIXED = {
     "Routes.csv",
@@ -157,13 +165,15 @@ def _sct_basename(cycle: AiracCycle) -> str:
     return f"UK_{cycle.year}_{cycle.number:02d}.sct"
 
 
-def _out_version_name(cycle: AiracCycle, n: int) -> str:
-    """Return the versioned filename for out.json: ``out.{ident}.{n}.json``."""
-    return f"out.{cycle.ident}.{n}.json"
+def _out_version_name(cycle_value: str) -> str:
+    """Return the archived filename for an out.json cycle value."""
+    if not _OUT_CYCLE_RE.match(cycle_value):
+        raise ArchiverError(f"Invalid out.json cycle value: {cycle_value!r}")
+    return f"out.{cycle_value}.json"
 
 
 def _existing_out_versions(directory: Path, cycle: AiracCycle) -> list[Path]:
-    """Return all ``out.{ident}.{n}.json`` files in *directory*, sorted by version."""
+    """Return all ``out.{ident}[.{release}].json`` files in *directory*."""
     results = []
     if not directory.is_dir():
         return results
@@ -171,21 +181,47 @@ def _existing_out_versions(directory: Path, cycle: AiracCycle) -> list[Path]:
         m = _OUT_VERSION_RE.match(p.name)
         if m and m.group(1) == cycle.ident:
             results.append(p)
-    return sorted(results, key=lambda p: int(_OUT_VERSION_RE.match(p.name).group(2)))
+    return sorted(
+        results,
+        key=lambda p: (
+            -1 if _OUT_VERSION_RE.match(p.name).group(2) is None
+            else int(_OUT_VERSION_RE.match(p.name).group(2))
+        ),
+    )
 
 
 def _next_out_version(directory: Path, cycle: AiracCycle) -> int:
-    """Return the next version number for ``out.{ident}.{n}.json`` in *directory*."""
+    """Return the next legacy archive sequence number for compatibility callers."""
     existing = _existing_out_versions(directory, cycle)
-    if not existing:
+    numbered = [p for p in existing if _OUT_VERSION_RE.match(p.name).group(2)]
+    if not numbered:
         return 1
-    last_n = int(_OUT_VERSION_RE.match(existing[-1].name).group(2))
+    last_n = int(_OUT_VERSION_RE.match(numbered[-1].name).group(2))
     return last_n + 1
+
+
+def _out_cycle_value(path: Path, cycle: AiracCycle) -> str:
+    """Read and validate the parser cycle value from *path*."""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ArchiverError(f"out.json is not valid JSON: {path}") from exc
+
+    cycle_value = payload.get("cycle")
+    if not isinstance(cycle_value, str):
+        raise ArchiverError(f"out.json is missing string cycle field: {path}")
+    if not _OUT_CYCLE_RE.match(cycle_value):
+        raise ArchiverError(f"Invalid out.json cycle value: {cycle_value!r}")
+    if cycle_value.split(".", 1)[0] != cycle.ident:
+        raise ArchiverError(
+            f"out.json cycle {cycle_value!r} does not match archive cycle {cycle.ident!r}"
+        )
+    return cycle_value
 
 
 def _is_allowed(path: Path, allowed_names: set[str]) -> bool:
     """Return True if *path*'s filename is in the allowlist."""
-    return path.name in allowed_names
+    return path.name in allowed_names or bool(_CURATION_AUDIT_RE.match(path.name))
 
 
 def _collect_files(cycle_dir: Path, cycle: AiracCycle) -> tuple[list[Path], list[str]]:
@@ -359,8 +395,9 @@ def archive_cycle(
     files that are absent, writes a manifest with SHA256 checksums, copies
     everything into ``{archive_repo}/vFPC {ident}/``, and runs ``git add``.
 
-    ``out.json`` is renamed to ``out.{ident}.{n}.json`` where *n* increments
-    on each archive run.  Previous versions are preserved across re-archives.
+    ``out.json`` is renamed to match its embedded parser cycle value, for
+    example ``out.2605.9.json``. Previous versions are preserved across
+    re-archives.
 
     Args:
         cycle:        The target AIRAC cycle.
@@ -377,9 +414,21 @@ def archive_cycle(
     """
     files, warnings = _collect_files(cycle_dir, cycle)
 
-    subdir = archive_repo / _archive_dir_name(cycle)
+    source_out = next((p for p in files if p.name == "out.json"), None)
+    has_out = source_out is not None
+    out_version_name: str | None = None
+    if has_out:
+        out_version_name = _out_version_name(_out_cycle_value(source_out, cycle))
 
-    # Preserve previously-archived out.{ident}.{n}.json versions by moving
+    subdir = archive_repo / _archive_dir_name(cycle)
+    if out_version_name is not None:
+        existing_out = subdir / out_version_name
+        if existing_out.exists() and _sha256(source_out) != _sha256(existing_out):
+            raise ArchiverError(
+                f"Archived parser output already exists with different content: {existing_out}"
+            )
+
+    # Preserve previously-archived out.{ident}[.{release}].json versions by moving
     # them to a temp directory on the same filesystem, then restoring after
     # rmtree.  This avoids holding file contents in RAM and minimises the
     # window where data is absent from both locations.
@@ -401,24 +450,21 @@ def archive_cycle(
             shutil.move(str(p), str(subdir / p.name))
         tmp_hold.rmdir()
 
-    # Determine the next version number for out.json and prepare the rename.
-    # _copy_files copies everything flat, so we handle the rename afterwards.
-    has_out = any(p.name == "out.json" for p in files)
     out_version_path: Path | None = None
-    if has_out:
-        version_n = _next_out_version(subdir, cycle)
-        out_version_name = _out_version_name(cycle, version_n)
 
     manifest_path = subdir / "manifest.md"
 
     # Copy source files into the archive subdir
     copied = _copy_files(files, subdir)
 
-    # Rename out.json → out.{ident}.{n}.json
+    # Rename out.json to the parser cycle release filename.
     if has_out:
         old_out = subdir / "out.json"
         out_version_path = subdir / out_version_name
-        old_out.rename(out_version_path)
+        if out_version_path.exists():
+            old_out.unlink()
+        else:
+            old_out.rename(out_version_path)
         copied = [out_version_path if p.name == "out.json" else p for p in copied]
 
     # Collect all out versions (preserved + new) for the manifest
