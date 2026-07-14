@@ -9,6 +9,7 @@ from src.config import Config, ConfigError, load
 MINIMAL_YAML = """\
 workspace_base: /work
 archive_repo: /archive
+hub_data_root: ""
 """
 
 
@@ -28,6 +29,9 @@ class TestLoad:
 
     def test_archive_repo_is_path(self, cfg_file):
         assert load(cfg_file).archive_repo == Path("/archive")
+
+    def test_empty_hub_data_root_is_none(self, cfg_file):
+        assert load(cfg_file).hub_data_root is None
 
     def test_file_not_found_raises(self, tmp_path):
         with pytest.raises(ConfigError, match="not found"):
@@ -79,6 +83,12 @@ class TestLocalOverride:
 
     def test_missing_local_file_is_ignored(self, cfg_file):
         assert load(cfg_file).workspace_base == Path("/work")
+
+    def test_local_sets_hub_data_root(self, cfg_file):
+        cfg_file.with_name("config.local.yaml").write_text(
+            "hub_data_root: /local/hub/data/local\n", encoding="utf-8"
+        )
+        assert load(cfg_file).hub_data_root == Path("/local/hub/data/local")
 
     def test_invalid_local_yaml_raises(self, cfg_file):
         cfg_file.with_name("config.local.yaml").write_text(

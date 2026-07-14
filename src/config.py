@@ -18,6 +18,7 @@ class ConfigError(ValueError):
 class Config:
     workspace_base: Path
     archive_repo: Path
+    hub_data_root: Path | None = None
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
@@ -38,9 +39,11 @@ def _require_str(raw: dict, key: str) -> str:
 
 
 def _parse(raw: dict) -> Config:
+    hub_data_root = raw.get("hub_data_root")
     return Config(
         workspace_base=Path(_require_str(raw, "workspace_base")),
         archive_repo=Path(_require_str(raw, "archive_repo")),
+        hub_data_root=Path(str(hub_data_root)) if hub_data_root else None,
     )
 
 

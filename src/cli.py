@@ -12,7 +12,8 @@ The ``archive`` command:
 2. Locates the cycle working directory under ``workspace_base``
    (``vFPC YYNN/`` — e.g. ``vFPC 2603/``).
 3. Collects allowlisted files from that directory (see ``archiver.py``).
-4. Copies them as flat files into ``{archive_repo}/vFPC YYNN/``,
+4. Copies source-folder files into ``{archive_repo}/vFPC YYNN/`` and, when
+   configured, Hub diagnostic artifacts under preserved subdirectories,
    renaming ``out.json`` to ``out.{ident}.{n}.json``, writes ``manifest.md``.
 5. Runs ``git add`` to stage all files for review before committing.
 
@@ -104,10 +105,13 @@ def archive(cycle: str | None) -> None:
         _abort(str(exc))
 
     cycle_dir = cfg.workspace_base / f"vFPC {target.ident}"
+    diagnostic_dir = cfg.hub_data_root / target.ident if cfg.hub_data_root else None
 
     click.echo(f"\nCycle:        {target}")
     click.echo(f"Working dir:  {cycle_dir}")
     click.echo(f"Archive repo: {cfg.archive_repo}\n")
+    if diagnostic_dir is not None:
+        click.echo(f"Hub data dir: {diagnostic_dir}\n")
 
     # Pre-flight check: collect files once and surface any hard errors or warnings
     # before touching the archive repo.  ArchiverError here means wrong/missing
@@ -125,7 +129,12 @@ def archive(cycle: str | None) -> None:
 
     click.echo("  Collecting files, writing manifest, copying, staging...", nl=False)
     try:
-        copied, manifest_path = archive_cycle(target, cycle_dir, cfg.archive_repo)
+        copied, manifest_path = archive_cycle(
+            target,
+            cycle_dir,
+            cfg.archive_repo,
+            diagnostic_dir=diagnostic_dir,
+        )
     except ArchiverError as exc:
         click.echo("")
         _abort(str(exc))

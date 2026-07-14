@@ -4,7 +4,7 @@ Copies prepared AIRAC cycle files into the [airac-data](https://github.com/VFPC/
 
 This tool does **not** build zip archives. It copies an allowlisted set of files into `airac-data`, writes `manifest.md`, renames `out.json` using the parser output `cycle` field, and runs `git add`.
 
-Run this tool after `New-SRDParser` has produced `out.json` in the cycle working directory.
+Run this tool after `New-SRDParser` has produced `out.json` in the cycle working directory and after any RAD/evaluator runtime artifacts for the cycle have been assembled in Hub `data/local`.
 
 ---
 
@@ -46,6 +46,7 @@ Edit `config.local.yaml`:
 ```yaml
 workspace_base: C:\Users\you\Desktop\vFPC files\Historical Files
 archive_repo:   C:\Users\you\Documents\GitHub\airac-data
+hub_data_root:  C:\Users\you\Documents\GitHub\vFPC-Hub\data\local
 ```
 
 `config.local.yaml` is gitignored.
@@ -54,6 +55,7 @@ archive_repo:   C:\Users\you\Documents\GitHub\airac-data
 |---|---|
 | `workspace_base` | Directory containing per-cycle working directories such as `vFPC 2603\` |
 | `archive_repo` | Path to your local clone of the `airac-data` repository |
+| `hub_data_root` | Optional path to `vFPC-Hub\data\local`; when set, selected `{cycle}` RAD/runtime/diagnostic artifacts are archived under preserved subdirectories |
 
 ---
 
@@ -84,8 +86,26 @@ The archiver copies only these cycle files into `airac-data`:
 | `procedure_facts.json` | Optional procedure fact artifact |
 | `restricted_area_facts.json` | Optional restricted-area fact artifact |
 | `manifest.json` | Optional runtime bundle manifest, archived as `runtime_bundle_manifest.json` |
+| `RAD_*.xlsx` | Optional raw EUROCONTROL RAD workbook used for the cycle |
+| `UK and Ireland SRD *.xlsx` | Optional raw NATS SRD workbook |
+| `EG-ENR-*.html`, `EI-*`, `FR-ENR-*.html` | Optional raw eAIP support source files |
+| `ad2/EG-AD-2.*-en-GB.html` | Optional raw AIP AD 2 airport source pages, archived under `ad2/` |
+| `airac_manifest.json`, `airac_manifest.md` | Optional source-folder receipt manifests |
+| `fetcher_log_*.txt` | Optional AIRAC fetcher run log |
+| `in.*.json`, `in.json.pre-*.bak` | Optional reviewed `in.json` patch/audit artifacts |
 
-Everything else in the working directory is ignored. Optional files are archived when present and ignored when absent.
+When `hub_data_root` is configured, these Hub diagnostic artifacts are also archived from `{hub_data_root}\YYNN`:
+
+| File/Pattern | Archive location |
+|---|---|
+| `repro_manifest.json` | `repro_manifest.json` |
+| `bundle/*.json` | `bundle/*.json` |
+| `rad/*.json` | `rad/*.json` |
+| `routes/out.pre-*.json` | `routes/out.pre-*.json` |
+| `tmp/*.summary.json`, `tmp/*_summary.json` | `diagnostics/summaries/` summary files |
+| `tmp/ifpuv_probe_plan_*.md` | `diagnostics/summaries/` probe plan notes |
+
+Everything else in the working directory and Hub diagnostic directory is ignored. Optional files are archived when present and ignored when absent.
 
 Expected files that are missing are recorded as warnings in `manifest.md`, but the archiver can still proceed as long as the directory looks like the correct cycle directory.
 
@@ -113,11 +133,12 @@ The `--cycle` argument is a four-digit AIRAC ident: two-digit year followed by t
 
 1. Validates that the target cycle directory exists.
 2. Collects only the allowlisted files for that cycle.
-3. Copies them as flat files into `{archive_repo}\vFPC YYNN\`.
-4. Renames `out.json` to `out.{cycle}.json` using the `cycle` value inside `out.json`.
-5. Renames the runtime bundle `manifest.json` to `runtime_bundle_manifest.json` when present.
-6. Writes `manifest.md` with cycle metadata, warnings, and SHA256 checksums.
-7. Runs `git add` in the `airac-data` repo so the archive is staged for review.
+3. Copies source-folder files as flat files into `{archive_repo}\vFPC YYNN\`.
+4. If `hub_data_root` is configured, copies selected Hub diagnostic files into preserved subdirectories under `{archive_repo}\vFPC YYNN\`.
+5. Renames `out.json` to `out.{cycle}.json` using the `cycle` value inside `out.json`.
+6. Renames the root-level runtime bundle `manifest.json` to `runtime_bundle_manifest.json` when present.
+7. Writes `manifest.md` with cycle metadata, warnings, and SHA256 checksums.
+8. Runs `git add` in the `airac-data` repo so the archive is staged for review.
 
 After the tool completes, review the staged changes in the `airac-data` repository and commit when satisfied:
 
@@ -152,7 +173,7 @@ When the same cycle is archived again:
 
 ## Retention and slimming
 
-The archive is intended to support rollback and recreation of recent publications. Recent cycles should therefore keep the full artifact set, including source CSVs, AIP extracts, RAD runtime artifacts, the sector file, `in.json`, `out.*.json`, `manifest.md`, and any curation notes.
+The archive is intended to support rollback and recreation of recent publications. Recent cycles should therefore keep the full artifact set, including source CSVs, raw SRD/RAD workbooks, raw eAIP support files, AIP extracts, RAD runtime artifacts, Hub runtime bundles, the sector file, `in.json`, `out.*.json`, `manifest.md`, and any curation notes.
 
 Older cycles may later be slimmed to reduce repository size. The current `slim` command is deliberately report-only because the exact age threshold and slim artifact set are still policy decisions.
 

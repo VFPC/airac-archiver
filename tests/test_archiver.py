@@ -61,6 +61,16 @@ _OPTIONAL_ALLOWED_FILES = [
     "procedure_facts.json",
     "restricted_area_facts.json",
     "manifest.json",
+    "RAD_2602_v1_9.xlsx",
+    "UK and Ireland SRD 19 February 2026_Excel and Notes.xlsx",
+    "EG-ENR-3.2-en-GB.html",
+    "EI_ENR_4_4_EN.pdf",
+    "FR-ENR-4.4-fr-FR.html",
+    "airac_manifest.json",
+    "airac_manifest.md",
+    "fetcher_log_20260219_090000.txt",
+    "in.note516_boundary_fix.20260219-090000.json",
+    "in.json.pre-note516-boundary-fix.20260219-090000.bak",
     "Routes.city_pair_cap_edits.20260522-082432.json",
     "Routes.confirmed_rad_denial_curation.20260608-071406.json",
     "Routes.vfp60_eg2444_curation.20260529-163336.md",
@@ -69,14 +79,15 @@ _OPTIONAL_ALLOWED_FILES = [
 
 # Files that should be silently ignored (not on the allowlist).
 _NON_ALLOWED_FILES = [
-    "EG-ENR-3.2-en-GB.html",
-    "EG-ENR-3.3-en-GB.html",
     "UK and Ireland SRD_March_2026.xlsx",
     "output_20260219_090000.json",
     "audit_decisions.md",
     "What's changed.csv",
     "log_20260219_0900.txt",
     "discord_announcement.md",
+    "RAD_notes.txt",
+    "EG-AD-2.EGLL-en-GB.html",
+    "full_trace_2602_initial.jsonl",
     "Routes.csv.pre-2605.9-confirmed-rad-denial-curation.20260608-071406.bak",
     "out.json.pre-2605.9-confirmed-rad-denial-curation.20260608-071645.bak",
 ]
@@ -286,9 +297,9 @@ class TestIsAllowed:
         allowed = set(_ALLOWED_FIXED) | {"UK_2026_02.sct"}
         assert not _is_allowed(Path("SRD_March.xlsx"), allowed)
 
-    def test_enr_html_not_allowed(self):
+    def test_unscoped_aip_html_not_allowed(self):
         allowed = set(_ALLOWED_FIXED) | {"UK_2026_02.sct"}
-        assert not _is_allowed(Path("EG-ENR-3.2-en-GB.html"), allowed)
+        assert not _is_allowed(Path("EG-AD-2.EGLL-en-GB.html"), allowed)
 
     def test_aip_segments_allowed(self):
         allowed = set(_ALLOWED_FIXED) | {"UK_2026_02.sct"}
@@ -332,6 +343,19 @@ class TestIsAllowed:
             Path("Routes.csv.pre-2605.9-confirmed-rad-denial-curation.20260608-071406.bak"),
             allowed,
         )
+
+    def test_rad_workbook_allowed(self):
+        allowed = set(_ALLOWED_FIXED) | {"UK_2026_02.sct"}
+        assert _is_allowed(Path("RAD_2602_v1_9.xlsx"), allowed)
+
+    def test_airac_manifest_allowed(self):
+        allowed = set(_ALLOWED_FIXED) | {"UK_2026_02.sct"}
+        assert _is_allowed(Path("airac_manifest.json"), allowed)
+
+    def test_enr_html_allowed_but_ad_html_not_allowed(self):
+        allowed = set(_ALLOWED_FIXED) | {"UK_2026_02.sct"}
+        assert _is_allowed(Path("EG-ENR-3.2-en-GB.html"), allowed)
+        assert not _is_allowed(Path("EG-AD-2.EGLL-en-GB.html"), allowed)
 
 
 # ---------------------------------------------------------------------------
@@ -695,6 +719,66 @@ class TestArchiveCycle:
         manifest_text = manifest_path.read_text(encoding="utf-8")
         assert "`runtime_bundle_manifest.json`" in manifest_text
         assert "`manifest.json`" not in manifest_text
+
+    def test_diagnostic_artifacts_preserve_subdirectories(self, tmp_path):
+        cycle_dir = _make_cycle_dir(tmp_path, _ALLOWED_FILES)
+        diagnostic_dir = tmp_path / "hub" / "data" / "local" / "2602"
+        (diagnostic_dir / "bundle").mkdir(parents=True)
+        (diagnostic_dir / "rad").mkdir()
+        (diagnostic_dir / "routes").mkdir()
+        (diagnostic_dir / "tmp").mkdir()
+        (diagnostic_dir / "repro_manifest.json").write_text('{"repro": true}', encoding="utf-8")
+        (diagnostic_dir / "bundle" / "runtime_rules.json").write_text('{"bundle": true}', encoding="utf-8")
+        (diagnostic_dir / "rad" / "runtime_rules.json").write_text('{"rad": true}', encoding="utf-8")
+        (diagnostic_dir / "routes" / "out.pre-curation.json").write_text('{"snapshot": true}', encoding="utf-8")
+        (diagnostic_dir / "tmp" / "full_trace.summary.json").write_text('{"summary": true}', encoding="utf-8")
+        (diagnostic_dir / "tmp" / "full_trace.jsonl").write_text("large trace\n", encoding="utf-8")
+
+        archive_repo = tmp_path / "airac-data"
+        archive_repo.mkdir()
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value.returncode = 0
+            copied, manifest_path = archive_cycle(
+                CYCLE_2602,
+                cycle_dir,
+                archive_repo,
+                diagnostic_dir=diagnostic_dir,
+            )
+
+        subdir = manifest_path.parent
+        names = {p.relative_to(subdir).as_posix() for p in copied}
+        assert "repro_manifest.json" in names
+        assert "bundle/runtime_rules.json" in names
+        assert "rad/runtime_rules.json" in names
+        assert "routes/out.pre-curation.json" in names
+        assert "diagnostics/summaries/full_trace.summary.json" in names
+        assert "diagnostics/summaries/full_trace.jsonl" not in names
+
+        manifest_text = manifest_path.read_text(encoding="utf-8")
+        assert "`bundle/runtime_rules.json`" in manifest_text
+        assert "`rad/runtime_rules.json`" in manifest_text
+        assert "`diagnostics/summaries/full_trace.summary.json`" in manifest_text
+
+    def test_ad2_source_pages_preserve_subdirectory(self, tmp_path):
+        cycle_dir = _make_cycle_dir(tmp_path, _ALLOWED_FILES)
+        ad2_dir = cycle_dir / "ad2"
+        ad2_dir.mkdir()
+        (ad2_dir / "EG-AD-2.EGLL-en-GB.html").write_text("<html>egll</html>", encoding="utf-8")
+        (ad2_dir / "ignore.txt").write_text("no", encoding="utf-8")
+
+        archive_repo = tmp_path / "airac-data"
+        archive_repo.mkdir()
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value.returncode = 0
+            copied, manifest_path = archive_cycle(CYCLE_2602, cycle_dir, archive_repo)
+
+        subdir = manifest_path.parent
+        names = {p.relative_to(subdir).as_posix() for p in copied}
+        assert "ad2/EG-AD-2.EGLL-en-GB.html" in names
+        assert "ad2/ignore.txt" not in names
+
+        manifest_text = manifest_path.read_text(encoding="utf-8")
+        assert "`ad2/EG-AD-2.EGLL-en-GB.html`" in manifest_text
 
     def test_optional_curation_note_copied_when_present(self, tmp_path):
         copied, _ = self._run(tmp_path, filenames=_ALLOWED_FILES + _OPTIONAL_ALLOWED_FILES)

@@ -124,6 +124,32 @@ _CURATION_AUDIT_RE = re.compile(
     r"^(?:Routes\..*(?:curation|edits).*|vfp\d+_.*curation.*)\.(?:json|md)$",
     re.IGNORECASE,
 )
+_SOURCE_PROVENANCE_RE = re.compile(
+    r"^(?:"
+    r"RAD_\d{4}_v\d+_\d+\.xlsx|"
+    r"UK and Ireland SRD .+\.xlsx|"
+    r"EG-ENR-[\d.]+-en-GB\.html|"
+    r"EI[-_].*\.(?:html|pdf)|"
+    r"FR-ENR-[\d.]+-fr-FR\.html|"
+    r"airac_manifest\.(?:json|md)|"
+    r"fetcher_log_\d+_\d+\.txt|"
+    r"in\..*\.json|"
+    r"in\.json\.pre-.*\.bak"
+    r")$",
+    re.IGNORECASE,
+)
+_DIAGNOSTIC_ARCHIVE_PATTERNS = (
+    "repro_manifest.json",
+    "bundle/*.json",
+    "rad/*.json",
+    "routes/out.pre-*.json",
+    "tmp/*.summary.json",
+    "tmp/*_summary.json",
+    "tmp/ifpuv_probe_plan_*.md",
+)
+_SOURCE_TREE_ARCHIVE_PATTERNS = (
+    "ad2/EG-AD-2.*-en-GB.html",
+)
 
 _SLIM_DROP_FIXED = {
     "Routes.csv",
@@ -221,7 +247,41 @@ def _out_cycle_value(path: Path, cycle: AiracCycle) -> str:
 
 def _is_allowed(path: Path, allowed_names: set[str]) -> bool:
     """Return True if *path*'s filename is in the allowlist."""
-    return path.name in allowed_names or bool(_CURATION_AUDIT_RE.match(path.name))
+    return (
+        path.name in allowed_names
+        or bool(_CURATION_AUDIT_RE.match(path.name))
+        or bool(_SOURCE_PROVENANCE_RE.match(path.name))
+    )
+
+
+def _collect_diagnostic_files(diagnostic_dir: Path | None) -> list[Path]:
+    """Collect optional Hub diagnostic artifacts for reproducibility.
+
+    The diagnostic directory is normally ``vFPC-Hub/data/local/YYNN``.  Missing
+    directories are treated as an absent optional input so older SRD-only
+    archive runs remain valid.
+    """
+    if diagnostic_dir is None or not diagnostic_dir.is_dir():
+        return []
+
+    files: set[Path] = set()
+    for pattern in _DIAGNOSTIC_ARCHIVE_PATTERNS:
+        files.update(
+            path for path in diagnostic_dir.glob(pattern)
+            if path.is_file()
+        )
+    return sorted(files, key=lambda p: p.relative_to(diagnostic_dir).as_posix())
+
+
+def _collect_source_tree_files(cycle_dir: Path) -> list[Path]:
+    """Collect source artifacts that must preserve subdirectory layout."""
+    files: set[Path] = set()
+    for pattern in _SOURCE_TREE_ARCHIVE_PATTERNS:
+        files.update(
+            path for path in cycle_dir.glob(pattern)
+            if path.is_file()
+        )
+    return sorted(files, key=lambda p: p.relative_to(cycle_dir).as_posix())
 
 
 def _collect_files(cycle_dir: Path, cycle: AiracCycle) -> tuple[list[Path], list[str]]:
@@ -280,6 +340,8 @@ def _create_manifest(
     files: list[Path],
     warnings: list[str],
     manifest_path: Path,
+    *,
+    root_path: Path | None = None,
 ) -> None:
     """Write a manifest.md recording cycle metadata, file list, and checksums."""
     now = datetime.now(tz=timezone.utc)
@@ -312,9 +374,17 @@ def _create_manifest(
         "| File | SHA256 |",
         "|------|--------|",
     ]
-    for file_path in sorted(files, key=lambda p: p.name):
+    def display_name(path: Path) -> str:
+        if root_path is None:
+            return path.name
+        try:
+            return path.relative_to(root_path).as_posix()
+        except ValueError:
+            return path.name
+
+    for file_path in sorted(files, key=display_name):
         checksum = _sha256(file_path)
-        lines.append(f"| `{file_path.name}` | `{checksum}` |")
+        lines.append(f"| `{display_name(file_path)}` | `{checksum}` |")
     lines.append("")
 
     manifest_path.write_text("\n".join(lines), encoding="utf-8")
@@ -329,6 +399,39 @@ def _copy_files(files: list[Path], dest_dir: Path) -> list[Path]:
         shutil.copy2(src, dst)
         copied.append(dst)
     return copied
+
+
+def _copy_relative_files(
+    files: list[Path],
+    source_root: Path,
+    dest_dir: Path,
+    *,
+    map_relative_path=None,
+) -> list[Path]:
+    """Copy *files* preserving paths relative to *source_root*."""
+    copied = []
+    for src in files:
+        rel = src.relative_to(source_root)
+        if map_relative_path is not None:
+            rel = map_relative_path(rel)
+        dst = dest_dir / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+        copied.append(dst)
+    return copied
+
+
+def _diagnostic_archive_relative_path(rel: Path) -> Path:
+    """Return the archive path for a diagnostic relative path.
+
+    ``tmp/`` is ignored by the airac-data repo at any depth, so selected
+    summary artifacts from Hub's temporary work directory are archived under
+    ``diagnostics/summaries/``.
+    """
+    parts = rel.parts
+    if parts and parts[0].lower() == "tmp":
+        return Path("diagnostics", "summaries", *parts[1:])
+    return rel
 
 
 def _git_stage(archive_repo: Path, *paths: Path) -> None:
@@ -388,6 +491,7 @@ def archive_cycle(
     cycle: AiracCycle,
     cycle_dir: Path,
     archive_repo: Path,
+    diagnostic_dir: Path | None = None,
 ) -> tuple[list[Path], Path]:
     """Collect allowlisted cycle files and stage them in the airac-data repo.
 
@@ -413,6 +517,8 @@ def archive_cycle(
             or if ``git add`` fails.
     """
     files, warnings = _collect_files(cycle_dir, cycle)
+    source_tree_files = _collect_source_tree_files(cycle_dir)
+    diagnostic_files = _collect_diagnostic_files(diagnostic_dir)
 
     source_out = next((p for p in files if p.name == "out.json"), None)
     has_out = source_out is not None
@@ -456,6 +562,17 @@ def archive_cycle(
 
     # Copy source files into the archive subdir
     copied = _copy_files(files, subdir)
+    source_tree_copied = _copy_relative_files(source_tree_files, cycle_dir, subdir)
+    diagnostic_copied = (
+        _copy_relative_files(
+            diagnostic_files,
+            diagnostic_dir,
+            subdir,
+            map_relative_path=_diagnostic_archive_relative_path,
+        )
+        if diagnostic_dir is not None
+        else []
+    )
 
     # Rename out.json to the parser cycle release filename.
     if has_out:
@@ -472,14 +589,22 @@ def archive_cycle(
 
     # Build the full file list for the manifest: non-out copied files + all out versions
     manifest_files = [p for p in copied if not _OUT_VERSION_RE.match(p.name)]
+    manifest_files.extend(source_tree_copied)
     manifest_files.extend(all_out_versions)
+    manifest_files.extend(diagnostic_copied)
 
     # Write manifest alongside the source files so its checksum is not
     # included in the file table (it can't hash itself).
-    _create_manifest(cycle, manifest_files, warnings, manifest_path)
+    _create_manifest(cycle, manifest_files, warnings, manifest_path, root_path=subdir)
 
     # Stage everything: copied files + preserved out versions + manifest
-    all_staged = copied + [p for p in all_out_versions if p not in copied] + [manifest_path]
+    all_staged = (
+        copied
+        + source_tree_copied
+        + [p for p in all_out_versions if p not in copied]
+        + diagnostic_copied
+        + [manifest_path]
+    )
     _git_stage(archive_repo, *all_staged)
 
-    return copied, manifest_path
+    return copied + source_tree_copied + diagnostic_copied, manifest_path

@@ -178,6 +178,26 @@ class TestArchiveCommand:
         assert args[0].ident == "2603"
         assert args[2] == cfg.archive_repo
 
+    def test_archive_cycle_called_with_diagnostic_dir_when_configured(self, tmp_path):
+        cfg = Config(
+            workspace_base=tmp_path / "workspace",
+            archive_repo=tmp_path / "airac-data",
+            hub_data_root=tmp_path / "hub" / "data" / "local",
+        )
+        cfg.workspace_base.mkdir(parents=True)
+        cfg.archive_repo.mkdir(parents=True)
+        runner = CliRunner()
+        archive_result = _make_archive_result(cfg, "2603")
+        with (
+            patch("src.cli.load", return_value=cfg),
+            patch("src.cli.archive_cycle", return_value=archive_result) as mock_archive,
+            patch("src.cli._collect_files", return_value=([], [])),
+        ):
+            result = runner.invoke(cli, ["archive", "--cycle", "2603"])
+        assert result.exit_code == 0
+        assert mock_archive.call_args.kwargs["diagnostic_dir"] == cfg.hub_data_root / "2603"
+        assert "Hub data dir" in result.output
+
     def test_cycle_dir_is_vfpc_subdir_of_workspace(self, tmp_path):
         cfg = _make_config(tmp_path)
         runner = CliRunner()

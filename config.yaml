@@ -13,3 +13,9 @@ workspace_base: ""
 # The archiver copies flat files and manifest here, then runs git add.
 # Set in config.local.yaml.
 archive_repo: ""
+
+# Optional path to vFPC-Hub/data/local.
+# When set, archive will also copy reproducibility/RAD/runtime diagnostic
+# artifacts from {hub_data_root}/YYNN into airac-data under preserved
+# subdirectories such as rad/, bundle/, routes/, and diagnostics/summaries/.
+hub_data_root: ""
