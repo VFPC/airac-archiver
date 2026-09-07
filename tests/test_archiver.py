@@ -550,8 +550,13 @@ class TestCreateManifest:
     def test_contains_effective_date(self, tmp_path):
         assert "2026-02-19" in self._write_manifest(tmp_path)
 
-    def test_contains_expiry_date(self, tmp_path):
-        assert CYCLE_2602.expiry_date.isoformat() in self._write_manifest(tmp_path)
+    def test_contains_next_cycle_effective_date_as_expires(self, tmp_path):
+        # A cycle does not expire the day before the next one starts; it
+        # expires (stops being current) the moment the next cycle takes
+        # effect. The manifest should show that date, not cycle.expiry_date.
+        manifest = self._write_manifest(tmp_path)
+        assert CYCLE_2602.next.effective_date.isoformat() in manifest
+        assert f"**Expires:** {CYCLE_2602.expiry_date.isoformat()}" not in manifest
 
     def test_contains_username(self, tmp_path):
         assert "testuser" in self._write_manifest(tmp_path)

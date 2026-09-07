@@ -353,7 +353,11 @@ def _create_manifest(
         "",
         f"**Cycle:** {cycle.ident}  ",
         f"**Effective:** {cycle.effective_date.isoformat()}  ",
-        f"**Expires:** {cycle.expiry_date.isoformat()}  ",
+        # Displayed as the next cycle's effective date, not cycle.expiry_date
+        # (the last inclusive day of this cycle). A cycle does not have a
+        # separate expiry moment; it simply stops being current the instant
+        # the next AIRAC cycle takes effect.
+        f"**Expires:** {cycle.next.effective_date.isoformat()}  ",
         f"**Archived:** {now.strftime('%Y-%m-%d %H:%M:%S')} UTC  ",
         f"**Archived by:** {user}  ",
         "",
